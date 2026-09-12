@@ -1,0 +1,87 @@
+# Every tunable in the pipeline. Layers read this, never hardcode.
+# Keep these fixed across an eval run or your scores are not comparable.
+
+company:
+  ticker: AAPL
+  form: 10-K
+  # Which filing to pull. "latest" or a fiscal year like 2025.
+  year: latest
+  # File-name stem for this company's artifacts in data/raw/ (apple_10k.txt,
+  # apple_balance_sheet.csv, ...). eval_set.json cites these exact names.
+  slug: apple
+  name: Apple Inc.
+
+chunking:
+  # Target chunk size in characters. ~900 chars is roughly 200-250 tokens,
+  # which sits comfortably inside bge-small's 512-token window.
+  target_chars: 900
+  overlap_chars: 150
+  # Chunks shorter than this are dropped (page footers, stray headers).
+  min_chars: 120
+  # Hard ceiling. bge-small truncates at 512 tokens (~2000 chars) without
+  # complaining, so anything longer is embedding text that silently never gets
+  # read. Wide financial tables are the usual offender; they get row-split.
+  max_chars: 2000
+  # Items with no retrieval value that actively pollute the keyword index.
+  # Item 15 is the exhibit index: hundreds of filing numbers and dates that
+  # match numeric queries and crowd out real content.
+  exclude_items:
+    - Item 15
+
+embedding:
+  model: BAAI/bge-small-en-v1.5
+  dim: 384
+  batch_size: 32
+  # bge-*-en-v1.5 retrieval convention: queries get an instruction prefix,
+  # passages do not. Dropping this measurably hurts recall.
+  query_prefix: "Represent this sentence for searching relevant passages: "
+
+vector_store:
+  collection: filings
+  distance: Cosine
+
+retrieval:
+  # Stage 1: how many candidates each index returns before fusion.
+  vector_top_k: 30
+  bm25_top_k: 30
+  # RRF constant. 60 is the standard value from the original RRF paper.
+  rrf_k: 60
+  # How many fused candidates survive to the cross-encoder.
+  rerank_candidates: 25
+  # How many reranked chunks are handed to Layer 4.
+  final_top_k: 6
+
+reranker:
+  model: BAAI/bge-reranker-base
+  batch_size: 16
+
+self_healing:
+  # Total retrieval attempts including the first. 3 = original + 2 rewrites.
+  max_attempts: 3
+  # A chunk must score at least this (0-1, from the grader) to count as relevant.
+  relevance_threshold: 0.5
+  # Need at least this many relevant chunks to proceed to generation.
+  min_relevant_chunks: 2
+  # If a rewritten query returns a chunk set this similar to the previous
+  # attempt (Jaccard over chunk ids), the loop is not making progress - stop
+  # and abstain rather than burning the remaining attempts.
+  stagnation_jaccard: 0.9
+
+generation:
+  # ONE model, held fixed. Changing this invalidates eval comparisons.
+  model: claude-opus-5
+  max_tokens: 4000
+  effort: high
+  # Cheaper model for the high-volume grading/rewriting calls in Layer 4.
+  utility_model: claude-haiku-4-5
+  utility_max_tokens: 2000
+
+confidence:
+  # Weights for the three signals. Must sum to 1.0.
+  weights:
+    hybrid_agreement: 0.3   # did vector + BM25 independently surface the same chunks
+    rerank_strength: 0.45   # how confident the cross-encoder was
+    loop_cleanliness: 0.25  # did Layer 4 pass first try or need retries
+  bands:
+    high: 0.70
+    medium: 0.45

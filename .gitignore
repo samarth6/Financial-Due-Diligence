@@ -14,3 +14,14 @@ env/
 
 
 .DS_Store
+# virtualenv (this project uses .venv, not venv)
+.venv/
+
+# Layer 2 derived artifacts - rebuild with `dd chunk` + `dd index`
+data/processed/
+data/qdrant/
+
+# packaging
+*.egg-info/
+build/
+dist/
