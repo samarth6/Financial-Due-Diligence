@@ -35,7 +35,7 @@ class Secrets(BaseSettings):
         extra="ignore",
     )
 
-    anthropic_api_key: str = ""
+    groq_api_key: str = ""
     edgar_identity: str = ""
     qdrant_mode: Literal["embedded", "server"] = "embedded"
     qdrant_path: str = "data/qdrant"
@@ -99,14 +99,24 @@ class SelfHealingCfg(BaseModel):
     relevance_threshold: float = 0.5
     min_relevant_chunks: int = 2
     stagnation_jaccard: float = 0.9
+    batch_grading: bool = True
 
 
 class GenerationCfg(BaseModel):
-    model: str = "claude-opus-5"
+    model: str = "openai/gpt-oss-120b"
     max_tokens: int = 4000
-    effort: str = "high"
-    utility_model: str = "claude-haiku-4-5"
+    # gpt-oss exposes reasoning_effort natively: low | medium | high.
+    effort: Literal["low", "medium", "high"] = "high"
+    # Grounded generation must reproduce the retrieved text, not embellish it.
+    temperature: float = 0.0
+    utility_model: str = "openai/gpt-oss-20b"
     utility_max_tokens: int = 2000
+    utility_effort: Literal["low", "medium", "high"] = "low"
+    # Groq's OpenAI-compatible endpoint; overridable for a proxy or gateway.
+    base_url: str = "https://api.groq.com/openai/v1"
+    # Free tier is 8K tokens/minute, and Layer 4 can issue several calls per
+    # question. 429s are expected, not exceptional - retry with backoff.
+    max_retries: int = 5
 
 
 class ConfidenceWeights(BaseModel):

@@ -66,15 +66,34 @@ self_healing:
   # attempt (Jaccard over chunk ids), the loop is not making progress - stop
   # and abstain rather than burning the remaining attempts.
   stagnation_jaccard: 0.9
+  # Grade all retrieved chunks in ONE call returning a JSON array, instead of
+  # one call per chunk. Per-chunk calls resend the question and instructions
+  # every time, which at 8K tokens/minute is most of the budget spent on
+  # boilerplate. Set false only to debug a single chunk's grade.
+  batch_grading: true
 
 generation:
-  # ONE model, held fixed. Changing this invalidates eval comparisons.
-  model: claude-opus-5
+  # Groq, OpenAI-compatible API. ONE model, held fixed - changing this
+  # invalidates eval comparisons.
+  #
+  # Both llama-3.3-70b-versatile and llama-3.1-8b-instant were shut down on
+  # 2026-08-16; these two are Groq's named replacements and support strict
+  # JSON-schema output, which Layer 4's grader depends on.
+  model: openai/gpt-oss-120b
   max_tokens: 4000
+  # gpt-oss reasoning_effort: low | medium | high.
   effort: high
-  # Cheaper model for the high-volume grading/rewriting calls in Layer 4.
-  utility_model: claude-haiku-4-5
+  # Deterministic: a citation engine should not paraphrase creatively.
+  temperature: 0.0
+  # Smaller/faster model for the high-volume grading and rewriting in Layer 4.
+  utility_model: openai/gpt-oss-20b
   utility_max_tokens: 2000
+  utility_effort: low
+  base_url: https://api.groq.com/openai/v1
+  # Free tier: 30 req/min, 1000 req/day, 8000 tokens/min, 200000 tokens/day.
+  # The 8K/minute ceiling is the binding constraint on this project - see
+  # self_healing.batch_grading below.
+  max_retries: 5
 
 confidence:
   # Weights for the three signals. Must sum to 1.0.
