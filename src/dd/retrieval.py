@@ -109,7 +109,10 @@ def rerank(
         return candidates
 
     model = get_reranker(cfg.reranker.model)
-    pairs = [(query, c.chunk.text) for c in candidates]
+    pairs = [
+    (query, f"[SEC 10-K filing, {c.chunk.item} - {c.chunk.section}] {c.chunk.text}")
+    for c in candidates
+    ]
     scores = model.predict(pairs, batch_size=cfg.reranker.batch_size)
 
     for c, score in zip(candidates, scores):

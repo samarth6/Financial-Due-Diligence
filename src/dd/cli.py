@@ -85,6 +85,27 @@ def stats() -> None:
 
 
 @app.command()
+def heal(query: str) -> None:
+    """Layer 4: self-healing retrieval loop, with full attempt history."""
+    from .self_healing import self_heal
+
+    o = self_heal(query)
+    console.print(f"[bold]succeeded:[/] {o.succeeded}")
+    console.print()
+    console.print("[bold]attempts:[/]")
+    for a in o.attempts:
+        console.print(f"  #{a.attempt} [{a.strategy}] {a.query!r} -> {a.n_relevant}/{a.n_retrieved} relevant")
+    console.print()
+    if not o.succeeded:
+        console.print(f"[red]abstain:[/] {o.abstain_reason}")
+        return
+
+    console.print("[bold]graded chunks:[/]")
+    for i, g in enumerate(o.chunks):
+        c = g.retrieved.chunk
+        console.print(f"  [{i}] score={g.relevance:.2f}  {c.item}/{c.subsection[:30]}")
+        console.print(f"      reason: {g.reason}")
+        
 def probe(query: str, k: int = 5) -> None:
     """Show each index's raw top-k for a query, side by side.
 
@@ -126,6 +147,33 @@ def probe(query: str, k: int = 5) -> None:
         f"both indexes agreed on [cyan]{len(overlap)}[/]/{k} chunks "
         "(this overlap is the hybrid_agreement signal Layer 5 scores on)"
     )
+
+@app.command()
+def retrieve(query: str) -> None:
+    """Layer 3: fused, reranked retrieval — the real answer, not probe's raw comparison."""
+    from .retrieval import hybrid_retrieve
+
+    results = hybrid_retrieve(query)
+
+    table = Table(title=f"hybrid_retrieve: {query!r}", show_lines=False)
+    table.add_column("#", width=3)
+    table.add_column("rerank", width=8)
+    table.add_column("rrf", width=8)
+    table.add_column("v_rank", width=6)
+    table.add_column("b_rank", width=6)
+    table.add_column("where", width=34)
+    table.add_column("text")
+
+    for rank, r in enumerate(results, 1):
+        c = r.chunk
+        where = f"{c.item} / {c.subsection[:22]}"
+        snippet = " ".join(c.text.split())[:90]
+        v_rank = str(r.vector_rank) if r.vector_rank else "-"
+        b_rank = str(r.bm25_rank) if r.bm25_rank else "-"
+        rerank_str = f"{r.rerank_score:.4f}" if r.rerank_score is not None else "-"
+        table.add_row(str(rank), rerank_str, f"{r.rrf_score:.4f}", v_rank, b_rank, where, snippet)
+
+    console.print(table)
 
 
 def _item_table(chunks: list[Chunk]) -> None:
