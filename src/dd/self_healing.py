@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import json
@@ -175,10 +173,6 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
         retrieved = hybrid_retrieve(current_query, conf)
         graded = grade_chunks(current_query, retrieved, conf)
 
-        # Read the threshold from config here rather than trust
-        # GradedChunk.is_relevant's own hardcoded 0.5 - that property and this
-        # config value happen to agree today, but only one of them is the
-        # actual source of truth, and it's this one.
         chunk_ids = {g.retrieved.chunk.chunk_id for g in graded}
         n_relevant = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
         mean_relevance = sum(g.relevance for g in graded) / len(graded) if graded else 0.0
@@ -206,6 +200,7 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
                 original_query=query,
                 final_query=current_query,
                 succeeded=True,
+                relevance_threshold=sh.relevance_threshold,
                 chunks=graded,
                 attempts=attempts,
             )
@@ -226,6 +221,7 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
             f"only {n_relevant_final} relevant chunk(s) found "
             f"after {len(attempts)} attempt(s) (need {sh.min_relevant_chunks})"
         ),
+        relevance_threshold=sh.relevance_threshold,
         chunks=graded,
         attempts=attempts,
     )
