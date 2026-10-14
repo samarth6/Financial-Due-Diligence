@@ -78,11 +78,6 @@ class GradedChunk(BaseModel):
     relevance: float = Field(ge=0.0, le=1.0)
     reason: str = ""
 
-    @property
-    def is_relevant(self) -> bool:
-        return self.relevance >= 0.5
-
-
 class AttemptRecord(BaseModel):
     """What happened on one pass through the retrieve-and-grade loop."""
 
@@ -104,13 +99,18 @@ class RetrievalOutcome(BaseModel):
     final_query: str
     succeeded: bool               # False means: abstain, do not generate an answer
     abstain_reason: str = ""
+    # The threshold Layer 4 judged these chunks against. Required, with no
+    # default: a default would let a caller forget it and silently filter at a
+    # different cutoff than the loop that decided `succeeded`.
+    relevance_threshold: float = Field(ge=0.0, le=1.0)
     chunks: list[GradedChunk] = Field(default_factory=list)
     structured_facts: list[dict[str, Any]] = Field(default_factory=list)
     attempts: list[AttemptRecord] = Field(default_factory=list)
 
     @property
     def relevant_chunks(self) -> list[GradedChunk]:
-        return [c for c in self.chunks if c.is_relevant]
+        """Chunks that cleared the same threshold Layer 4 used to decide success."""
+        return [c for c in self.chunks if c.relevance >= self.relevance_threshold]
 
 
 class Citation(BaseModel):
