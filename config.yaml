@@ -4,8 +4,7 @@
 company:
   ticker: AAPL
   form: 10-K
-  # Which filing to pull. "latest" or a fiscal year like 2025.
-  year: latest
+  year: 2025
   # File-name stem for this company's artifacts in data/raw/ (apple_10k.txt,
   # apple_balance_sheet.csv, ...). eval_set.json cites these exact names.
   slug: apple
