@@ -52,7 +52,7 @@ retrieval:
   final_top_k: 6
 
 reranker:
-  model: BAAI/bge-reranker-base
+  model: BAAI/bge-reranker-large
   batch_size: 16
 
 self_healing:
