@@ -105,7 +105,9 @@ def heal(query: str) -> None:
         c = g.retrieved.chunk
         console.print(f"  [{i}] score={g.relevance:.2f}  {c.item}/{c.subsection[:30]}")
         console.print(f"      reason: {g.reason}")
-        
+
+
+@app.command()
 def probe(query: str, k: int = 5) -> None:
     """Show each index's raw top-k for a query, side by side.
 
@@ -174,6 +176,32 @@ def retrieve(query: str) -> None:
         table.add_row(str(rank), rerank_str, f"{r.rrf_score:.4f}", v_rank, b_rank, where, snippet)
 
     console.print(table)
+
+
+@app.command()
+def answer(query: str) -> None:
+    """Layer 5: full pipeline - cited answer with confidence."""
+    from .generation import answer as run_answer
+
+    a = run_answer(query)
+    if not a.answered:
+        console.print(f"[red]no answer:[/] {a.text}")
+        console.print(f"[dim]({a.elapsed_s}s)[/]")
+        return
+    console.print(a.text)
+    console.print()
+    console.print("[bold]sources:[/]")
+    for c in a.citations:
+        console.print(f"  {c.marker} {c.source}")
+    cf = a.confidence
+    console.print()
+    console.print(
+        f"[bold]confidence:[/] {cf.band.upper()} ({cf.score})  "
+        f"hybrid={cf.hybrid_agreement} rerank={cf.rerank_strength} loop={cf.loop_cleanliness}"
+    )
+    for n in cf.notes:
+        console.print(f"  note: {n}")
+    console.print(f"[dim]({a.elapsed_s}s)[/]")
 
 
 def _item_table(chunks: list[Chunk]) -> None:

@@ -147,10 +147,19 @@ def rewrite_query(
     resp = client.chat.completions.create(
         model=cfg.generation.utility_model,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
+        max_tokens=300,
         temperature=0.0,
+        # gpt-oss spends tokens "thinking" before it answers. Without a low
+        # effort setting it can use up the whole budget thinking and return
+        # an empty reply - which then gets searched and graded as if it were
+        # a real question.
+        reasoning_effort=cfg.generation.utility_effort,
     )
-    return resp.choices[0].message.content.strip()
+    new_query = (resp.choices[0].message.content or "").strip()
+    # Never hand back an empty query. Falling back to the last query means
+    # the next attempt returns the same chunks, and the stagnation check
+    # ends the loop honestly instead of grading against nothing.
+    return new_query or tried_query
 
 
 # --- Step 3: the loop itself ------------------------------------------------
