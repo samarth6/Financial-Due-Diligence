@@ -7,13 +7,15 @@ name = "dd"
 version = "0.1.0"
 description = "Financial due-diligence RAG platform over SEC filings"
 requires-python = ">=3.10"
-dynamic = ["dependencies"]
+# Dependencies live in requirements.txt, not here. That file needs a pip
+# option (the CPU-only PyTorch index), and setuptools refuses to read a
+# dependency file containing pip options - so this is left empty and
+# requirements.txt installs both the dependencies and this package (`-e .`).
+# Install with:  pip install -r requirements.txt
+dependencies = []
 
 [project.scripts]
 dd = "dd.cli:app"
-
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
 
 [tool.setuptools.packages.find]
 where = ["src"]
