@@ -1,3 +1,13 @@
+"""Layer 4: self-healing retrieval loop.
+
+Layer 3 retrieves chunks unconditionally - it has no idea whether what it
+found is actually good. This layer is the checkpoint: grade what came back,
+and if it's not good enough, reword the question and try again. If it's
+still not good enough after a few tries, stop and say so honestly instead of
+generating an answer from weak evidence. That honesty is the entire point -
+most RAG systems skip this and hallucinate confidently on bad retrieval.
+"""
+
 from __future__ import annotations
 
 import json
@@ -7,11 +17,16 @@ from groq import Groq
 from .config import Config, get_config, get_secrets
 from .models import AttemptRecord, GradedChunk, RetrievalOutcome, RetrievedChunk
 from .retrieval import hybrid_retrieve
+from .structured import get_structured_facts
 
 _CLIENT: Groq | None = None
 
 
 def get_groq_client(cfg: Config) -> Groq:
+    """Singleton, same reasoning as the Qdrant client in indexing.py -
+    no need to re-authenticate a new client on every call in a loop that may
+    call the API several times per question.
+    """
     global _CLIENT
     if _CLIENT is None:
         secrets = get_secrets()
@@ -132,18 +147,11 @@ def rewrite_query(
     resp = client.chat.completions.create(
         model=cfg.generation.utility_model,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
+        max_tokens=200,
         temperature=0.0,
-        reasoning_effort=cfg.generation.utility_effort,
     )
-    new_query = (resp.choices[0].message.content or "").strip()
+    return resp.choices[0].message.content.strip()
 
-    # If the model still returns nothing usable, fall back to the query that
-    # was actually tried rather than search on an empty string. Reusing it
-    # means the next attempt's chunk set will look identical to this one,
-    # which correctly triggers stagnation and ends the loop honestly -
-    # instead of silently burning an attempt on a search for nothing.
-    return new_query or tried_query
 
 # --- Step 3: the loop itself ------------------------------------------------
 
@@ -164,6 +172,24 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
     conf = cfg or get_config()
     sh = conf.self_healing
 
+    # Structured lookup is cheap (no LLM call, no embeddings) and based on
+    # the ORIGINAL question only - rewording is a narrative-search strategy,
+    # it has nothing to do with which DuckDB row the question asked about.
+    # Run it once, up front, regardless of how the narrative loop below goes.
+    structured_facts = get_structured_facts(query, conf)
+
+    # A resolved, non-ambiguous structured fact IS sufficient evidence to
+    # answer on its own - it's an exact number from the filing, not a guess.
+    # Without this, a question like "total shareholders' equity" could find
+    # the exact right number here and still get marked succeeded=False just
+    # because the narrative search (checked below) didn't separately find
+    # 2+ chunks that restate that number in prose - which most balance-sheet
+    # figures never do.
+    has_clean_structured_fact = bool(structured_facts) and not any(
+        f.get("ambiguous") or f.get("year_unspecified") or f.get("year_not_found")
+        for f in structured_facts
+    )
+
     attempts: list[AttemptRecord] = []
     current_query = query
     prev_chunk_ids: set[str] | None = None
@@ -173,6 +199,10 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
         retrieved = hybrid_retrieve(current_query, conf)
         graded = grade_chunks(current_query, retrieved, conf)
 
+        # Read the threshold from config here rather than trust
+        # GradedChunk.is_relevant's own hardcoded 0.5 - that property and this
+        # config value happen to agree today, but only one of them is the
+        # actual source of truth, and it's this one.
         chunk_ids = {g.retrieved.chunk.chunk_id for g in graded}
         n_relevant = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
         mean_relevance = sum(g.relevance for g in graded) / len(graded) if graded else 0.0
@@ -195,14 +225,15 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
             )
         )
 
-        if n_relevant >= sh.min_relevant_chunks:
+        if n_relevant >= sh.min_relevant_chunks or has_clean_structured_fact:
             return RetrievalOutcome(
                 original_query=query,
                 final_query=current_query,
                 succeeded=True,
-                relevance_threshold=sh.relevance_threshold,
                 chunks=graded,
                 attempts=attempts,
+                structured_facts=structured_facts,
+                relevance_threshold=sh.relevance_threshold,
             )
 
         if stagnated:
@@ -221,7 +252,8 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
             f"only {n_relevant_final} relevant chunk(s) found "
             f"after {len(attempts)} attempt(s) (need {sh.min_relevant_chunks})"
         ),
-        relevance_threshold=sh.relevance_threshold,
         chunks=graded,
         attempts=attempts,
+        structured_facts=structured_facts,
+        relevance_threshold=sh.relevance_threshold,
     )
