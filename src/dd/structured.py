@@ -1,11 +1,3 @@
-"""Layer 3 (structured path): maps a natural-language question to a known
-row + year in the DuckDB warehouse, when one applies.
-
-Narrative chunks can't answer "what was net income" precisely - the exact
-number lives in a table, not a sentence. This module detects that case and
-fetches the number directly, instead of hoping hybrid search stumbles onto
-a passage that happens to state it.
-"""
 
 from __future__ import annotations
 
@@ -78,11 +70,13 @@ AMBIGUOUS_LABEL_CONCEPT_HINTS: dict[str, str] = {
 
 
 def _normalize(text: str) -> str:
-    """Lowercase, strip, and fold the filing's smart quote to a plain one -
-    the CSV's 'shareholders’ equity' and a user typing "shareholders'
-    equity" with an ordinary keyboard apostrophe must compare equal.
+    """Lowercase, strip, and remove apostrophes of every kind (smart or
+    plain). The keywords are written without apostrophes, so "shareholders'
+    equity", "shareholders’ equity" and "shareholders equity" must all
+    become the same string - otherwise a question typed with an apostrophe
+    silently fails to match.
     """
-    return text.lower().strip().replace("’", "'").replace("‘", "'")
+    return text.lower().strip().replace("\u2019", "").replace("\u2018", "").replace("'", "")
 
 
 # Matches "2025", "FY2025", "fiscal 2025" -> group 1 is the 4-digit year.
@@ -125,13 +119,7 @@ def match_structured_query(query: str, fuzzy_cutoff: float = 0.72) -> Structured
     q = _normalize(query)
     year = _extract_year(query)
 
-    # Collect every keyword that appears in the question, then keep the
-    # LONGEST one, not the first one found. A generic trigger like "revenue"
-    # is a substring of almost any revenue-related question, so checking
-    # labels in dict order and returning on the first hit means a specific
-    # question ("iPhone revenue") can get silently matched to the wrong,
-    # more generic label ("Net sales") just because that label happened to
-    # be listed first. Longer keyword = more specific = more likely correct.
+  
     keyword_hits: list[tuple[int, str, str]] = []  # (len(kw), table, label)
     for table, entries in CANONICAL_LABELS.items():
         for label, keywords in entries:
