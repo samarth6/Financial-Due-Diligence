@@ -1,12 +1,19 @@
 # Only needed if you set QDRANT_MODE=server in .env.
 # The default (QDRANT_MODE=embedded) requires no Docker at all.
+# Switching modes does not move data: the server starts empty, so run
+# `dd index` once after switching.
 services:
   qdrant:
-    image: qdrant/qdrant:v1.12.1
+    # Must match qdrant-client in requirements.txt (1.19.0). Qdrant warns, and
+    # newer client calls can fail, when the two drift more than a minor apart.
+    image: qdrant/qdrant:v1.19.0
     container_name: dd-qdrant
     ports:
-      - "6333:6333"   # REST + dashboard at http://localhost:6333/dashboard
-      - "6334:6334"   # gRPC
+      # 0.0.0.0 = reachable from every machine on the network, so teammates
+      # can share one server. There is no API key: anyone on the same network
+      # can read, overwrite or delete the collection. Use a trusted network.
+      - "0.0.0.0:6333:6333"   # REST + dashboard at http://<host-ip>:6333/dashboard
+      - "0.0.0.0:6334:6334"   # gRPC
     volumes:
       - qdrant_storage:/qdrant/storage
     restart: unless-stopped
