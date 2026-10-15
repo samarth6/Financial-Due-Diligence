@@ -90,7 +90,7 @@ class RetrievalCfg(BaseModel):
 
 
 class RerankerCfg(BaseModel):
-    model: str = "BAAI/bge-reranker-base"
+    model: str = "BAAI/bge-reranker-large"
     batch_size: int = 16
 
 
