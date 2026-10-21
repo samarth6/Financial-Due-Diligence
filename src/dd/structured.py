@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import difflib
@@ -35,11 +34,11 @@ CANONICAL_LABELS: dict[str, list[tuple[str, list[str]]]] = {
         ("Services", ["services revenue", "services"]),
     ],
     "balance_sheet": [
-        ("Total assets", ["total assets"]),
-        ("Total liabilities", ["total liabilities"]),
+        ("Total assets", ["total assets", "assets"]),
+        ("Total liabilities", ["total liabilities", "liabilities"]),
         ("Total current assets", ["total current assets", "current assets"]),
         ("Total current liabilities", ["total current liabilities", "current liabilities"]),
-        ("Total shareholders’ equity", ["shareholders equity", "stockholders equity", "total equity"]),
+        ("Total shareholders’ equity", ["shareholders equity", "stockholders equity", "total equity", "equity"]),
         ("Cash and cash equivalents", ["cash and cash equivalents", "cash on hand"]),
         ("Accounts payable", ["accounts payable"]),
         ("Inventories", ["inventory", "inventories"]),
@@ -72,7 +71,7 @@ AMBIGUOUS_LABEL_CONCEPT_HINTS: dict[str, str] = {
 def _normalize(text: str) -> str:
     """Lowercase, strip, and remove apostrophes of every kind (smart or
     plain). The keywords are written without apostrophes, so "shareholders'
-    equity", "shareholders’ equity" and "shareholders equity" must all
+    equity", "shareholders\u2019 equity" and "shareholders equity" must all
     become the same string - otherwise a question typed with an apostrophe
     silently fails to match.
     """
@@ -82,22 +81,28 @@ def _normalize(text: str) -> str:
 # Matches "2025", "FY2025", "fiscal 2025" -> group 1 is the 4-digit year.
 # Matches "FY25", "FY 25" -> group 2 is the 2-digit year, expanded to 20xx.
 _YEAR_RE = re.compile(r"\b(?:fy\s?)?(20\d{2})\b|\bfy\s?(\d{2})\b", re.IGNORECASE)
+# A range: "FY2023-FY2025", "2023 to 2025", "FY2023 through FY2025".
+_RANGE_RE = re.compile(
+    r"\b(?:fy\s?)?(20\d{2})\s*(?:-|\u2013|to|through)\s*(?:fy\s?)?(20\d{2})\b", re.IGNORECASE
+)
 
 
-def _extract_year(query: str) -> str | None:
-    """Pull a 4-digit fiscal year out of the question, if one was stated.
+def _extract_years(query: str) -> list[str]:
+    """Every fiscal year the question states, in order, no repeats.
 
-    Deliberately narrow: only recognizes an explicit year written as 2025,
-    FY2025, fiscal 2025, or FY25. A question with no year in it returns
-    None - the caller decides what that means (it should not mean "guess
-    the most recent year").
+    A range is filled in ("FY2023-FY2025" -> 2023, 2024, 2025), because a
+    trend question needs the middle year too. Still deliberately narrow:
+    only years written out (2025, FY2025, FY25). No year in the question
+    returns [] - the caller decides what that means (it should not mean
+    "guess the most recent year").
     """
-    m = _YEAR_RE.search(query)
-    if not m:
-        return None
-    if m.group(1):
-        return m.group(1)
-    return "20" + m.group(2)
+    years: list[str] = []
+    for m in _RANGE_RE.finditer(query):
+        lo, hi = sorted((int(m.group(1)), int(m.group(2))))
+        years += [str(y) for y in range(lo, hi + 1)]
+    for m in _YEAR_RE.finditer(query):
+        years.append(m.group(1) or "20" + m.group(2))
+    return list(dict.fromkeys(years))
 
 
 @dataclass
@@ -108,28 +113,43 @@ class StructuredMatch:
     year: str | None = None  # 4-digit fiscal year extracted from the question, if any
 
 
-def match_structured_query(query: str, fuzzy_cutoff: float = 0.72) -> StructuredMatch | None:
-    """Try to map a question to one known (table, label) pair, plus a year
-    if the question stated one.
+def _with_years(table: str, label: str, via: str, years: list[str]) -> list[StructuredMatch]:
+    """One match per year; a single year-less match when no year was given,
+    so the fetch can flag it as year_unspecified instead of guessing."""
+    return [StructuredMatch(table, label, via, y) for y in years] or [StructuredMatch(table, label, via, None)]
+
+
+def match_structured_query(query: str, fuzzy_cutoff: float = 0.72) -> list[StructuredMatch]:
+    """Map a question to every known (table, label) it mentions, times every
+    year it states. "Services vs iPhone revenue, FY2024 to FY2025" -> 4 matches.
 
     Keyword pass first: cheap, exact, high-confidence. Fuzzy pass only runs
     if keywords found nothing - it catches wording the keyword list didn't
     anticipate, at the cost of being a softer, lower-confidence match.
     """
     q = _normalize(query)
-    year = _extract_year(query)
+    years = _extract_years(query)
 
-  
-    keyword_hits: list[tuple[int, str, str]] = []  # (len(kw), table, label)
+    # Whole words only: a plain substring check let "mac" match inside
+    # "macroeconomic". Record where each keyword sits in the question.
+    hits: list[tuple[int, int, str, str]] = []  # (start, end, table, label)
     for table, entries in CANONICAL_LABELS.items():
         for label, keywords in entries:
             for kw in keywords:
-                if kw in q:
-                    keyword_hits.append((len(kw), table, label))
+                for m in re.finditer(r"\b" + re.escape(kw) + r"\b", q):
+                    hits.append((m.start(), m.end(), table, label))
 
-    if keyword_hits:
-        _, table, label = max(keyword_hits, key=lambda h: h[0])
-        return StructuredMatch(table=table, label=label, matched_via="keyword", year=year)
+    # Drop a hit that sits inside a longer one: in "diluted earnings per
+    # share", "earnings" (net income) is part of the longer phrase, not a
+    # second thing being asked about. Same for "assets" in "total current assets".
+    kept = [
+        h for h in hits
+        if not any(o[0] <= h[0] and h[1] <= o[1] and o[1] - o[0] > h[1] - h[0] for o in hits)
+    ]
+
+    if kept:
+        labels = list(dict.fromkeys((t, lab) for _, _, t, lab in sorted(kept)))  # question order
+        return [m for t, lab in labels for m in _with_years(t, lab, "keyword", years)]
 
     # Fuzzy fallback: compare against every keyword phrase, not just the
     # canonical label itself - "how much did apple earn" is closer to
@@ -143,8 +163,8 @@ def match_structured_query(query: str, fuzzy_cutoff: float = 0.72) -> Structured
                     best = (score, table, label)
 
     if best and best[0] >= fuzzy_cutoff:
-        return StructuredMatch(table=best[1], label=best[2], matched_via="fuzzy", year=year)
-    return None
+        return _with_years(best[1], best[2], "fuzzy", years)
+    return []
 
 
 # --- Step 2: fetch the actual number ---------------------------------------
@@ -250,17 +270,20 @@ def fetch_structured_fact(match: StructuredMatch, cfg: Config | None = None) -> 
 # --- Entry point -------------------------------------------------------
 
 
+# A comparison over a few years needs a handful of facts; more than this
+# means the question matched far more than it asked about, and every extra
+# fact is extra text in the answer prompt.
+MAX_FACTS = 8
+
+
 def get_structured_facts(query: str, cfg: Config | None = None) -> list[dict]:
-    """Question in, zero or one structured fact out - shaped to drop
+    """Question in, one fact per (label, year) it asks about - shaped to drop
     directly into RetrievalOutcome.structured_facts.
     """
-    match = match_structured_query(query)
-    if match is None:
-        return []
-
-    fact = fetch_structured_fact(match, cfg)
-    if fact is None:
-        return []
-
-    fact["_matched_via"] = match.matched_via
-    return [fact]
+    facts: list[dict] = []
+    for match in match_structured_query(query)[:MAX_FACTS]:
+        fact = fetch_structured_fact(match, cfg)
+        if fact is not None:
+            fact["_matched_via"] = match.matched_via
+            facts.append(fact)
+    return facts
