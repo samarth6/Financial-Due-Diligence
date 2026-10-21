@@ -98,9 +98,9 @@ class SelfHealingCfg(BaseModel):
     max_attempts: int = 3
     relevance_threshold: float = 0.5
     min_relevant_chunks: int = 2
+    strong_chunk_threshold: float = 0.8
     stagnation_jaccard: float = 0.9
     batch_grading: bool = True
-
 
 class GenerationCfg(BaseModel):
     model: str = "openai/gpt-oss-120b"

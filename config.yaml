@@ -59,8 +59,11 @@ self_healing:
   max_attempts: 3
   # A chunk must score at least this (0-1, from the grader) to count as relevant.
   relevance_threshold: 0.5
-  # Need at least this many relevant chunks to proceed to generation.
+    # Need at least this many relevant chunks to proceed to generation.
   min_relevant_chunks: 2
+  # ...or a single chunk this strong. Some answers sit in one paragraph,
+  # so requiring a second chunk made success depend on a weaker one.
+  strong_chunk_threshold: 0.8
   # If a rewritten query returns a chunk set this similar to the previous
   # attempt (Jaccard over chunk ids), the loop is not making progress - stop
   # and abstain rather than burning the remaining attempts.
