@@ -31,11 +31,31 @@ from .self_healing import get_groq_client, self_heal
 # --- Step 1: lay out the evidence with markers -----------------------------
 
 
-def _format_value(value: float) -> str:
-    """112010000000.0 -> '112,010,000,000'; 7.46 -> '7.46'."""
-    if float(value).is_integer():
-        return f"{value:,.0f}"
-    return f"{value:,.2f}"
+def _is_per_share(fact: dict) -> bool:
+    """EPS and other per-share amounts are already in dollars per share and
+    must never be scaled. Checked by XBRL concept first, label as a backup."""
+    concept = str(fact.get("concept") or "")
+    return "PerShare" in concept or "per share" in fact["label"].lower()
+
+
+def _format_fact_value(fact: dict) -> str:
+    """Show a database value in the SAME unit as the 10-K's own tables.
+
+    The warehouse stores whole dollars (112010000000.0), but the filing's
+    tables - which reach the prompt as narrative chunks - state "(in millions)".
+    Putting both side by side made the model convert between them, where a
+    slip is a 1000x error. Every dollar fact is therefore shown in millions:
+    112010000000.0 -> '$112,010 million'; -120686000000.0 -> '-$120,686 million'.
+    Per-share amounts stay as they are: 7.46 -> '$7.46 per share'.
+    The stored value is untouched - only what the model reads changes.
+    """
+    value = float(fact["value"])
+    sign = "-" if value < 0 else ""
+    if _is_per_share(fact):
+        return f"{sign}${abs(value):,.2f} per share"
+    millions = abs(value) / 1_000_000
+    shown = f"{millions:,.0f}" if millions.is_integer() else f"{millions:,.2f}"
+    return f"{sign}${shown} million"
 
 
 def _clean_facts(outcome: RetrievalOutcome) -> list[dict]:
@@ -53,8 +73,7 @@ def _fact_line(fact: dict) -> str:
     table = fact["table"].replace("_", " ")
     return (
         f"{fact['label']}, fiscal year {fact['year']}: "
-        f"{_format_value(fact['value'])} (US dollars unless the label says "
-        f"otherwise; from Apple's {table})"
+        f"{_format_fact_value(fact)} (from Apple's {table})"
     )
 
 
@@ -109,7 +128,7 @@ Evidence:
 Rules:
 - Every factual claim must end with the marker of the evidence it comes \
 from, like [1] or [S1]. Use only markers that appear above. This applies \
-even to a one-number answer, e.g. "$73,733,000,000 [S1]".
+even to a one-number answer, e.g. "$73,733 million [S1]".
 - Also list every marker you used in "citations", e.g. ["[S1]"].
 - Check that the evidence answers what was actually asked. A number about \
 the right topic is not enough if it measures something else (for example, \
@@ -118,7 +137,10 @@ revenue in dollars does not answer a question about units sold).
 and use "answer" to say briefly what is missing.
 - Be concise. State numbers exactly as given, always with their unit. \
 Financial tables in a 10-K are often stated "in millions" - if the evidence \
-says so, say so (e.g. "$73,733 million"), never a bare number."""
+says so, say so (e.g. "$73,733 million"), never a bare number.
+- Financial statement data [S1], [S2], ... is already in millions of US \
+dollars, the same unit as the filing's tables (per-share amounts are in \
+dollars per share). Keep every number in the unit shown; do not convert."""
 
 
 def _ask_model(question: str, evidence: str, cfg: Config) -> dict:
