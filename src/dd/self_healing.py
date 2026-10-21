@@ -234,8 +234,13 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
             )
         )
 
-        if n_relevant >= sh.min_relevant_chunks or has_clean_structured_fact:
-            return RetrievalOutcome(
+        # One very strong chunk is enough on its own: some answers sit in a
+        # single paragraph, and requiring a second chunk made the result
+        # depend on how a weaker, only loosely related chunk was graded.
+        has_strong_chunk = any(g.relevance >= sh.strong_chunk_threshold for g in graded)
+
+        if n_relevant >= sh.min_relevant_chunks or has_strong_chunk or has_clean_structured_fact:
+                return RetrievalOutcome(
                 original_query=query,
                 final_query=current_query,
                 succeeded=True,

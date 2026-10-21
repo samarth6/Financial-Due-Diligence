@@ -1,4 +1,4 @@
-# Graded answers — eval run of 2026-10-20, after multi-number lookup
+# Graded answers — eval run of 2026-10-21, after the "one strong chunk" rule
 
 Verdicts: **correct** (all key points, nothing wrong) · **partly** (right, but misses a key point) · **wrong** (states something false) · **refused** (said it couldn't answer, but the filing does answer it).
 
@@ -8,59 +8,65 @@ Verdicts: **correct** (all key points, nothing wrong) · **partly** (right, but 
 |---|---|---|---|---|
 | numeric_lookup (auto) | 8 | 0 | 0 | 0 |
 | no_answer (auto) | 5 | 0 | 0 | 0 |
-| narrative_comprehension | 5 | 1 | 0 | 1 |
+| narrative_comprehension | 6 | 1 | 0 | 0 |
 | cross_referencing | 2 | 0 | 0 | 3 |
 | trend | 3 | 1 | 0 | 0 |
-| **All 29 — after** | **23** | **2** | **0** | **4** |
-| All 29 — before | 19 | 3 | 0 | 7 |
+| **All 29 — this run** | **24** | **2** | **0** | **3** |
 
-- **4 answers rescued by the fix, all correct:** #8 (balance sheet equation), #14, #15, #16. Arithmetic in #8 and #16 checked by hand.
-- **Still zero wrong answers.**
-- **Two changes NOT caused by the fix** (run-to-run variance): #6 went partly → correct; #3 went correct → refused.
-- **HIGH confidence: 16 of 16 correct** across both auto- and hand-graded answers in this run. MEDIUM and LOW are mixed (the only LOW, #2, is correct).
+Progress across the three runs:
+
+| Run | Correct | Partly | Wrong | Refused |
+|---|---|---|---|---|
+| 1. Baseline | 19 | 3 | 0 | 7 |
+| 2. + multi-number lookup | 23 | 2 | 0 | 4 |
+| 3. + one-strong-chunk rule | 24 | 2 | 0 | 3 |
+
+- **Still zero wrong answers** across all three runs.
+- **The 5 trick questions are still refused**, so the looser success rule didn't make the system answer what it shouldn't.
+- **HIGH confidence: 17 of 18 correct, 1 partly** (#13). MEDIUM and LOW are still mixed; the only LOW answer (#2) is correct.
 
 ## 1. [narrative] Tariffs — **partly** (medium)
-Same as last run: right effects, but no countries, no Q2 FY2025 start, no retaliatory tariffs.
+Right effects; still no countries, no Q2 FY2025 start, no retaliatory tariffs.
 
 ## 2. [narrative] Cybersecurity — **correct** (low)
-Regular attacks, measures may be insufficient, harms. Misses "higher-value target due to high profile". Correct answer scored LOW again.
+Regular attacks, measures may be insufficient, harms. Misses "higher-value target due to high profile". Correct answer scored LOW, for the third run in a row.
 
-## 3. [narrative] Natural disasters — **refused**
-"Only 1 relevant chunk after 3 attempts." Was correct last run. Cause: the "need 2 relevant chunks" rule; the answer sits in one paragraph, so success depends on a second, weaker chunk crossing 0.5. A rerun with `dd heal` succeeded on attempt 2.
+## 3. [narrative] Natural disasters — **correct** (high) — *fixed*
+Matches the expected answer, including climate change. Succeeded on attempt 1 via the one-strong-chunk rule.
 
 ## 4. [narrative] Wearables decrease — **correct** (high)
 
 ## 5. [narrative] Services increase — **correct** (high)
 
 ## 6. [narrative] Acquisitions — **correct** (high)
-Now includes management distraction, higher liabilities, inadequate returns, impairment. Improved since last run, but by variance, not by the code change.
+All the expected risks: distraction, liabilities, regulatory challenges, inadequate returns, impairment, approvals.
 
 ## 7. [narrative] Legal proceedings — **correct** (medium)
-Includes "not yet fully resolved" and "increased over time". Long, nothing wrong.
+Ordinary course, increasing over time. Doesn't say "some unresolved". Nothing wrong.
 
-## 8. [cross-ref] Assets = Liabilities + Equity — **correct** (high) — *rescued*
+## 8. [cross-ref] Assets = Liabilities + Equity — **correct** (high)
 359,241,000,000 = 285,508,000,000 + 73,733,000,000. Checked: exact.
 
 ## 9. [cross-ref] Cash flow reconciliation — **refused**
-No "change in cash" label in the lookup list.
+The question writes "(operating, investing, financing)", not "operating activities", so the lookup finds nothing; "change in cash" isn't a label either.
 
 ## 10. [cross-ref] EPS grew faster than net income — **refused**
-Better refusal than last time: it now has EPS and net income for both years, and says what's missing (share count, buybacks).
+Has EPS and net income for both years; says share count and buybacks are missing. Correct reason for refusing.
 
 ## 11. [cross-ref] Products gross margin — **correct** (high)
-Matches filing lines 730 and 732. The expected answer is wrong ("higher sales volume" isn't in the filing).
+Matches filing lines 730 and 732. Adds "mix shift toward lower-margin products", which follows from the filing's wording. The eval set's expected answer is still wrong ("higher sales volume").
 
 ## 12. [cross-ref] FY2024 net income dip — **refused**
-Reason (State Aid tax charge) is in the notes; text search misses it.
+The reason (State Aid tax charge) is in the notes; text search misses it.
 
-## 13. [trend] Services vs iPhone growth — **partly** (medium)
-Right conclusion, still no numbers. It cited a text chunk ([1]) instead of the database facts, which is worth investigating.
+## 13. [trend] Services vs iPhone growth — **partly** (high)
+Now cites the four database figures ([S1]–[S4]), which is why it moved to HIGH. But the answer text still gives no numbers or growth rates (13.5% vs 4.2%). **The one HIGH answer that isn't fully correct.**
 
-## 14. [trend] Net income FY2023–FY2025 — **correct** (high) — *rescued*
-96,995 → 93,736 → 112,010 (millions), "decline then increase". Matches.
+## 14. [trend] Net income FY2023–FY2025 — **correct** (high)
+96,995 → 93,736 → 112,010 (millions), down then up.
 
-## 15. [trend] Diluted EPS FY2023–FY2025 — **correct** (high) — *rescued*
-$6.13 → $6.08 → $7.46. Matches. Lists the values without describing the pattern in words.
+## 15. [trend] Diluted EPS FY2023–FY2025 — **correct** (high)
+$6.13 → $6.08 → $7.46.
 
-## 16. [trend] Total liabilities FY2024 → FY2025 — **correct** (high) — *rescued*
-Decreased by $22,522,000,000. Checked: 308,030 − 285,508 = 22,522 (millions). Doesn't give the % (~7.3%).
+## 16. [trend] Total liabilities FY2024 → FY2025 — **correct** (high)
+Fell by $22,522,000,000, from $308,030,000,000 to $285,508,000,000. Checked: exact.
