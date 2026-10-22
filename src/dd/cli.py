@@ -204,6 +204,51 @@ def answer(query: str) -> None:
     console.print(f"[dim]({a.elapsed_s}s)[/]")
 
 
+@app.command()
+def act(query: str) -> None:
+    """Layer 6: answer, propose a checklist item, validate it, ask, then add."""
+    from pydantic import ValidationError
+
+    from .actions import CHECKLIST_PATH, execute, propose, validate
+    from .generation import answer as run_answer
+
+    a = run_answer(query)
+    if not a.answered:
+        console.print(f"[red]no answer, so nothing to act on:[/] {a.text}")
+        return
+    console.print(a.text)
+    console.print()
+
+    # Step 1: propose. A draft that doesn't fit the format stops here.
+    try:
+        item = propose(a)
+    except ValidationError as exc:
+        console.print(f"[red]rejected: the draft didn't fit the checklist format[/]\n{exc}")
+        return
+    console.print("[bold]proposed checklist item:[/]")
+    console.print(f"  title:     {item.title}")
+    console.print(f"  severity:  {item.severity}")
+    console.print(f"  summary:   {item.summary}")
+    console.print(f"  citations: {', '.join(item.citations)}")
+
+    # Step 2: validate. Any failed rule stops it before a person is asked.
+    problems = validate(item, a)
+    if problems:
+        console.print("[red]rejected:[/]")
+        for p in problems:
+            console.print(f"  - {p}")
+        return
+
+    # Step 3: approve. Defaults to no, so pressing Enter never adds anything.
+    if not typer.confirm("Add to checklist?", default=False):
+        console.print("not added.")
+        return
+
+    # Step 4: execute.
+    entry = execute(item, a)
+    console.print(f"[green]added[/] {entry['id']} -> {CHECKLIST_PATH}")
+
+
 def _item_table(chunks: list[Chunk]) -> None:
     counts: dict[str, int] = {}
     for c in chunks:
