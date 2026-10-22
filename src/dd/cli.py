@@ -183,7 +183,57 @@ def answer(query: str) -> None:
     """Layer 5: full pipeline - cited answer with confidence."""
     from .generation import answer as run_answer
 
+    _print_answer(run_answer(query))
+
+
+@app.command()
+def act(
+    query: str,
+    action: str = typer.Option("checklist", help="checklist | flag | memo"),
+) -> None:
+    """Layer 6: answer, propose an action, validate it, ask, then run it."""
+    from .actions import ACTIONS
+    from .generation import answer as run_answer
+
+    if action not in ACTIONS:
+        console.print(f"[red]unknown action '{action}'[/] - use one of: {', '.join(ACTIONS)}")
+        return
     a = run_answer(query)
+    _print_answer(a)
+    _act_on(a, action)
+
+
+@app.command()
+def session() -> None:
+    """Load the models once, then answer questions until you type 'exit'."""
+    from .actions import ACTIONS
+    from .generation import answer as run_answer
+    from .retrieval import hybrid_retrieve
+
+    # Each `dd` command is a new Python process that reloads the embedding
+    # model and the reranker. Here they load once: one throwaway search
+    # (no LLM call, so no API cost) pulls both into memory, and every later
+    # question reuses them.
+    console.print("loading models...")
+    hybrid_retrieve("warm-up")
+    console.print("[green]ready.[/] Type a question, or 'exit' to quit.")
+
+    while True:
+        query = typer.prompt("\nquestion", default="", show_default=False).strip()
+        if query.lower() in {"", "exit", "quit"}:
+            break
+        a = run_answer(query)
+        _print_answer(a)
+        action = typer.prompt(
+            f"action? ({' / '.join(ACTIONS)}, Enter to skip)", default="", show_default=False
+        ).strip().lower()
+        if action in ACTIONS:
+            _act_on(a, action)
+        elif action:
+            console.print(f"[red]unknown action '{action}'[/], skipped")
+
+
+def _print_answer(a) -> None:
     if not a.answered:
         console.print(f"[red]no answer:[/] {a.text}")
         console.print(f"[dim]({a.elapsed_s}s)[/]")
@@ -202,6 +252,48 @@ def answer(query: str) -> None:
     for n in cf.notes:
         console.print(f"  note: {n}")
     console.print(f"[dim]({a.elapsed_s}s)[/]")
+
+
+def _act_on(a, action: str) -> None:
+    """Layer 6's four steps for one answer and one action."""
+    from pydantic import ValidationError
+
+    from .actions import ACTIONS
+
+    propose, validate, execute = ACTIONS[action]
+
+    # Only a flag acts on a refusal; the other two need a real answer.
+    if not a.answered and action != "flag":
+        console.print("nothing to act on. To send this to a human, use the flag action")
+        return
+
+    # Step 1: propose. A draft that doesn't fit the format stops here.
+    try:
+        draft = propose(a)
+    except ValidationError as exc:
+        console.print(f"[red]rejected: the draft didn't fit the {action} format[/]\n{exc}")
+        return
+    console.print(f"\n[bold]proposed {action}:[/]")
+    for field, value in draft.model_dump().items():
+        if isinstance(value, list):
+            value = ", ".join(value)
+        console.print(f"  [bold]{field}:[/] {value}")
+
+    # Step 2: validate. Any failed rule stops it before a person is asked.
+    problems = validate(draft, a)
+    if problems:
+        console.print("[red]rejected:[/]")
+        for p in problems:
+            console.print(f"  - {p}")
+        return
+
+    # Step 3: approve. Defaults to no, so pressing Enter never runs anything.
+    if not typer.confirm(f"Run this {action}?", default=False):
+        console.print("not done.")
+        return
+
+    # Step 4: execute.
+    console.print(f"[green]{execute(draft, a)}[/]")
 
 
 def _item_table(chunks: list[Chunk]) -> None:
