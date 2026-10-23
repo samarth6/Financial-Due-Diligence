@@ -1,9 +1,20 @@
-"""Command line entry points for the pipeline.
+"""Command line entry points for the pipeline - the `dd` command.
 
-    python -m dd.cli chunk      # text -> data/processed/chunks.jsonl
-    python -m dd.cli index      # chunks -> Qdrant + BM25
-    python -m dd.cli stats      # what is currently indexed
-    python -m dd.cli probe "…"  # raw output of each index, unfused
+Run from the project root (`dd` is installed by `pip install -r requirements.txt`;
+`python -m dd.cli <command>` works the same way):
+
+    dd chunk                    # Layer 2: 10-K text -> data/processed/chunks.jsonl
+    dd index                    # Layer 2: chunks -> Qdrant + BM25 indexes
+    dd stats                    # Layer 2: check chunks and both indexes agree
+    dd probe "question"         # Layer 2: raw output of each index, unfused
+    dd retrieve "question"      # Layer 3: fused + reranked passages
+    dd heal "question"          # Layer 4: grade passages, reword and retry
+    dd answer "question"        # Layer 5: full pipeline - cited answer + confidence
+    dd act "question" --action checklist|flag|memo
+                                # Layer 6: answer, then propose/validate/approve/run
+    dd session                  # load models once, answer until 'exit'
+
+`dd --help` lists the same commands; `dd <command> --help` shows options.
 """
 
 from __future__ import annotations
