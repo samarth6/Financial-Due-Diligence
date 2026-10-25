@@ -26,7 +26,7 @@ from .models import (
     GradedChunk,
     RetrievalOutcome,
 )
-from .self_healing import get_groq_client, self_heal
+from .self_healing import ProgressFn, emit, get_groq_client, self_heal
 
 # --- Step 1: lay out the evidence with markers -----------------------------
 
@@ -272,7 +272,9 @@ def _confidence(
 # --- Entry point -------------------------------------------------------
 
 
-def generate_answer(outcome: RetrievalOutcome, cfg: Config | None = None) -> Answer:
+def generate_answer(
+    outcome: RetrievalOutcome, cfg: Config | None = None, on_progress: ProgressFn | None = None
+) -> Answer:
     """Layer 5's core: RetrievalOutcome in, Answer out."""
     conf = cfg or get_config()
     query = outcome.original_query
@@ -284,6 +286,7 @@ def generate_answer(outcome: RetrievalOutcome, cfg: Config | None = None) -> Ans
     chunks = outcome.relevant_chunks
     facts = _clean_facts(outcome)
     evidence, lookup = _build_evidence(chunks, facts)
+    emit(on_progress, "write", passages=len(chunks), facts=len(facts))
     result = _ask_model(query, evidence, conf)
 
     # Refusal 2: the evidence is on-topic but doesn't answer what was asked.
@@ -317,10 +320,14 @@ def generate_answer(outcome: RetrievalOutcome, cfg: Config | None = None) -> Ans
     )
 
 
-def answer(query: str, cfg: Config | None = None) -> Answer:
-    """Full pipeline in one call: Layers 3 + 4 (self_heal) then Layer 5."""
+def answer(query: str, cfg: Config | None = None, on_progress: ProgressFn | None = None) -> Answer:
+    """Full pipeline in one call: Layers 3 + 4 (self_heal) then Layer 5.
+
+    on_progress, if given, is told about each step as it happens - used by
+    Layer 7's live room. Leaving it out changes nothing.
+    """
     conf = cfg or get_config()
     start = time.perf_counter()
-    result = generate_answer(self_heal(query, conf), conf)
+    result = generate_answer(self_heal(query, conf, on_progress), conf, on_progress)
     result.elapsed_s = round(time.perf_counter() - start, 2)
     return result

@@ -233,6 +233,43 @@ def session() -> None:
             console.print(f"[red]unknown action '{action}'[/], skipped")
 
 
+@app.command()
+def serve(
+    host: str = typer.Option(
+        "0.0.0.0",
+        help="0.0.0.0 = every network this machine is on; a specific address "
+        "(e.g. its Tailscale IP from `tailscale ip -4`) = only that network",
+    ),
+    port: int = typer.Option(8000, help="the team opens http://<address>:<port>"),
+) -> None:
+    """Layer 7: start the shared team room in the browser."""
+    import socket
+
+    import uvicorn
+
+    from .server import WEB_DIST, create_app
+
+    if not WEB_DIST.exists():
+        console.print("[yellow]the web app isn't built yet[/] - run: cd web; npm install; npm run build")
+    if host in ("0.0.0.0", "::"):
+        try:
+            lan_ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            lan_ip = "<this machine's IP>"
+        console.print(f"team room: [cyan]http://{lan_ip}:{port}[/]  (this machine: http://localhost:{port})")
+    else:
+        # Listening on one address only (e.g. Tailscale): that address is the
+        # link for everyone, including this machine - localhost won't answer.
+        console.print(f"team room: [cyan]http://{host}:{port}[/]  (only reachable through {host})")
+    console.print(
+        "[dim]The room holds the search index open - stop it (Ctrl+C) before running other "
+        "dd commands or the eval on this machine, unless QDRANT_MODE=server.[/]"
+    )
+    # One worker process: the room's state lives in memory, so every browser
+    # must reach the same process.
+    uvicorn.run(create_app(), host=host, port=port, workers=1)
+
+
 def _print_answer(a) -> None:
     if not a.answered:
         console.print(f"[red]no answer:[/] {a.text}")
