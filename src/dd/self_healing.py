@@ -236,7 +236,6 @@ def self_heal(
     # it has nothing to do with which DuckDB row the question asked about.
     # Run it once, up front, regardless of how the narrative loop below goes.
     structured_facts = get_structured_facts(query, conf)
-    emit(on_progress, "lookup", facts=[f["label"] for f in structured_facts if "value" in f])
 
     # Facts with a real value get graded like passages (on attempt 1, against
     # the original question). Flagged ones (ambiguous, no year...) have no
@@ -245,6 +244,7 @@ def self_heal(
     flagged_facts = [f for f in structured_facts if "value" not in f]
     relevant_facts: list[dict] = []
     fact_scores: list[float] = []
+    emit(on_progress, "lookup", facts=[f["label"] for f in clean_facts])
 
     attempts: list[AttemptRecord] = []
     current_query = query
@@ -255,8 +255,19 @@ def self_heal(
     for attempt_num in range(1, sh.max_attempts + 1):
         emit(on_progress, "search", attempt=attempt_num, query=current_query)
         retrieved = hybrid_retrieve(current_query, conf)
-        emit(on_progress, "grade", attempt=attempt_num, passages=len(retrieved))
-        graded = grade_chunks(current_query, retrieved, conf)
+        emit(on_progress, "grade", attempt=attempt_num, passages=len(retrieved),
+             facts=len(clean_facts) if attempt_num == 1 else 0)
+        if attempt_num == 1:
+            graded, fact_scores = grade_chunks(current_query, retrieved, conf, clean_facts)
+            # A fact that doesn't answer the question isn't passed on: iPhone
+            # revenue graded low for "iPhone units" never reaches Layer 5.
+            relevant_facts = [
+                {**f, "_relevance": s}
+                for f, s in zip(clean_facts, fact_scores)
+                if s >= sh.relevance_threshold
+            ]
+        else:
+            graded, _ = grade_chunks(current_query, retrieved, conf)
 
         chunk_ids = {g.retrieved.chunk.chunk_id for g in graded}
         n_relevant_chunks = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
@@ -285,12 +296,15 @@ def self_heal(
                 ),
             )
         )
+        emit(
+            on_progress, "graded", attempt=attempt_num, relevant=n_relevant_chunks, total=len(graded),
+            # Facts are only graded on attempt 1; report them there.
+            facts_relevant=len(relevant_facts) if attempt_num == 1 else None,
+            facts_total=len(clean_facts) if attempt_num == 1 else None,
+        )
 
-        # One very strong chunk is enough on its own: some answers sit in a
-        # single paragraph, and requiring a second chunk made the result
-        # depend on how a weaker, only loosely related chunk was graded.
-        has_strong_chunk = any(g.relevance >= sh.strong_chunk_threshold for g in graded)
-        emit(on_progress, "graded", attempt=attempt_num, relevant=n_relevant, total=len(graded))
+        if best is None or (n_relevant_chunks, mean_relevance) > best[:2]:
+            best = (n_relevant_chunks, mean_relevance, graded, current_query)
 
         # One very strong item is enough on its own: some answers sit in a
         # single paragraph (or a single figure), and requiring a second one
@@ -310,12 +324,15 @@ def self_heal(
             )
 
         if stagnated:
+            emit(on_progress, "stagnated", attempt=attempt_num)
             break  # rewriting again would just burn the remaining attempts for nothing
 
         # Nothing on the first try even comes close: the filing almost
         # certainly doesn't cover this, and rewording rarely rescues it.
         # Saves two rewrites (~40 s) on questions that end in a refusal anyway.
         if attempt_num == 1 and max(scores + fact_scores, default=0.0) < sh.give_up_below:
+            emit(on_progress, "give_up", best=round(max(scores + fact_scores, default=0.0), 2),
+                 below=sh.give_up_below)
             break
 
         prev_chunk_ids = chunk_ids
