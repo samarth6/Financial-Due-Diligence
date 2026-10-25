@@ -11,6 +11,7 @@ most RAG systems skip this and hallucinate confidently on bad retrieval.
 from __future__ import annotations
 
 import json
+from typing import Any, Callable
 
 from groq import Groq
 
@@ -202,7 +203,25 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
+# Called as on_progress(stage, details) at each step, so a live view (Layer 7)
+# can show what the pipeline is doing. Optional everywhere: None = silent.
+ProgressFn = Callable[[str, dict[str, Any]], None]
+
+
+def emit(on_progress: ProgressFn | None, stage: str, **details: Any) -> None:
+    """Report one step. A broken listener must never break the answer, so
+    any error it raises is swallowed here."""
+    if on_progress is None:
+        return
+    try:
+        on_progress(stage, details)
+    except Exception:  # noqa: BLE001 - progress reporting is best-effort
+        pass
+
+
+def self_heal(
+    query: str, cfg: Config | None = None, on_progress: ProgressFn | None = None
+) -> RetrievalOutcome:
     """Retrieve, grade, and retry with a reworded query up to `max_attempts`
     times. Stops early on success, on stagnation (a retry that returns
     essentially the same chunks isn't making progress), or after the last
@@ -217,6 +236,7 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
     # it has nothing to do with which DuckDB row the question asked about.
     # Run it once, up front, regardless of how the narrative loop below goes.
     structured_facts = get_structured_facts(query, conf)
+    emit(on_progress, "lookup", facts=[f["label"] for f in structured_facts if "value" in f])
 
     # Facts with a real value get graded like passages (on attempt 1, against
     # the original question). Flagged ones (ambiguous, no year...) have no
@@ -233,18 +253,10 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
     best: tuple[int, float, list[GradedChunk], str] | None = None  # (n_relevant, mean, chunks, query)
 
     for attempt_num in range(1, sh.max_attempts + 1):
+        emit(on_progress, "search", attempt=attempt_num, query=current_query)
         retrieved = hybrid_retrieve(current_query, conf)
-        if attempt_num == 1:
-            graded, fact_scores = grade_chunks(current_query, retrieved, conf, clean_facts)
-            # A fact that doesn't answer the question isn't passed on: iPhone
-            # revenue graded low for "iPhone units" never reaches Layer 5.
-            relevant_facts = [
-                {**f, "_relevance": s}
-                for f, s in zip(clean_facts, fact_scores)
-                if s >= sh.relevance_threshold
-            ]
-        else:
-            graded, _ = grade_chunks(current_query, retrieved, conf)
+        emit(on_progress, "grade", attempt=attempt_num, passages=len(retrieved))
+        graded = grade_chunks(current_query, retrieved, conf)
 
         chunk_ids = {g.retrieved.chunk.chunk_id for g in graded}
         n_relevant_chunks = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
@@ -274,8 +286,11 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
             )
         )
 
-        if best is None or (n_relevant_chunks, mean_relevance) > best[:2]:
-            best = (n_relevant_chunks, mean_relevance, graded, current_query)
+        # One very strong chunk is enough on its own: some answers sit in a
+        # single paragraph, and requiring a second chunk made the result
+        # depend on how a weaker, only loosely related chunk was graded.
+        has_strong_chunk = any(g.relevance >= sh.strong_chunk_threshold for g in graded)
+        emit(on_progress, "graded", attempt=attempt_num, relevant=n_relevant, total=len(graded))
 
         # One very strong item is enough on its own: some answers sit in a
         # single paragraph (or a single figure), and requiring a second one
@@ -306,6 +321,7 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
         prev_chunk_ids = chunk_ids
         if attempt_num < sh.max_attempts:
             current_query = rewrite_query(query, current_query, graded, conf)
+            emit(on_progress, "rewrite", attempt=attempt_num + 1, query=current_query)
 
     # Abstain with the BEST attempt's evidence, not just the last one's.
     best_n, _, best_chunks, best_query = best
