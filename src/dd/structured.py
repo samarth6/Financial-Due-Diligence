@@ -287,3 +287,15 @@ def get_structured_facts(query: str, cfg: Config | None = None) -> list[dict]:
             fact["_matched_via"] = match.matched_via
             facts.append(fact)
     return facts
+
+
+def describe_fact(fact: dict) -> str:
+    """One line describing a fact, shared by Layer 4's grader and Layer 5's
+    answer prompt so both see the number described the same way."""
+    value = fact["value"]
+    number = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
+    table = fact["table"].replace("_", " ")
+    return (
+        f"{fact['label']}, fiscal year {fact['year']}: {number} "
+        f"(US dollars unless the label says otherwise; from Apple's {table})"
+    )

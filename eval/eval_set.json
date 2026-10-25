@@ -129,8 +129,7 @@
   },
   {
     "question": "Apple's Products gross margin dollars increased in FY2025 ($112,887M vs $109,633M in FY2024) but Products gross margin percentage decreased (36.8% vs 37.2%). What explains this?",
-    "expected_answer": "Per Apple's MD&A, the gross margin percentage decrease was primarily due to a different mix of products and tariff costs, partially offset by other favorable costs -- even though absolute margin dollars still rose due to higher sales volume.",
-    "source": "apple_10k.txt, MD&A, 'Products Gross Margin' section (~lines 730-732); cross-checked against apple_income_statement.csv gross margin figures",
+    "expected_answer": "Per Apple's MD&A: margin dollars rose primarily due to favorable costs and a different mix of products, partially offset by tariff costs; the margin percentage fell primarily due to a different mix of products and tariff costs, partially offset by other favorable costs. The filing does not cite sales volume as a reason.",    "source": "apple_10k.txt, MD&A, 'Products Gross Margin' section (~lines 730-732); cross-checked against apple_income_statement.csv gross margin figures",
     "type": "cross_referencing",
     "difficulty": "hard"
   },
