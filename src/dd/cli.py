@@ -95,6 +95,8 @@ def heal(query: str) -> None:
     console.print("[bold]attempts:[/]")
     for a in o.attempts:
         console.print(f"  #{a.attempt} [{a.strategy}] {a.query!r} -> {a.n_relevant}/{a.n_retrieved} relevant")
+        if a.note:
+            console.print(f"      {a.note}")
     console.print()
     if not o.succeeded:
         console.print(f"[red]abstain:[/] {o.abstain_reason}")
