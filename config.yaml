@@ -67,6 +67,9 @@ self_healing:
   # If a rewritten query returns a chunk set this similar to the previous
   # attempt (Jaccard over chunk ids), the loop is not making progress - stop
   # and abstain rather than burning the remaining attempts.
+    # If the first attempt's best score is below this, give up instead of
+  # rewording: the filing almost certainly doesn't cover the question.
+  give_up_below: 0.2
   stagnation_jaccard: 0.9
   # Grade all retrieved chunks in ONE call returning a JSON array, instead of
   # one call per chunk. Per-chunk calls resend the question and instructions

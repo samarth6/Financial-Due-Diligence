@@ -17,7 +17,7 @@ from groq import Groq
 from .config import Config, get_config, get_secrets
 from .models import AttemptRecord, GradedChunk, RetrievalOutcome, RetrievedChunk
 from .retrieval import hybrid_retrieve
-from .structured import get_structured_facts
+from .structured import describe_fact, get_structured_facts
 
 _CLIENT: Groq | None = None
 
@@ -51,69 +51,100 @@ _GRADE_SCHEMA = {
                     "reason": {"type": "string"},
                 },
                 "required": ["relevance", "reason"],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["grades"],
+    "additionalProperties": False,
 }
 
-_GRADE_PROMPT = """You are grading whether passages from a company's 10-K \
-filing actually answer a question - not whether they're topically related, \
-but whether they contain the specific information asked for.
+_GRADE_PROMPT = """You are grading whether evidence from a company's 10-K \
+filing actually answers a question - not whether it's topically related, \
+but whether it contains the specific information asked for.
 
 Question: {question}
 
-Passages:
+Evidence:
 {passages}
 
-For EACH passage, in order, give a relevance score from 0.0 (does not answer \
+Items marked [S1], [S2]... are figures from the financial statements. A \
+figure is relevant only if it is one of the numbers needed to answer the \
+question - the right measure, not just the right topic (revenue in dollars \
+is not "units sold").
+
+For EACH item, in order, give a relevance score from 0.0 (does not answer \
 the question) to 1.0 (directly answers it), and a one-sentence reason.
-Return exactly {n} grades, in the same order as the passages."""
+Return exactly {n} grades, in the same order as the items."""
+
+
+def _clamp(x: object) -> float:
+    """Scores must be 0-1 for GradedChunk; a model writing 1.2 or "0.8"
+    shouldn't crash the question."""
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def grade_chunks(
-    query: str, chunks: list[RetrievedChunk], cfg: Config
-) -> list[GradedChunk]:
-    """Grade every chunk in ONE call instead of one call per chunk.
+    query: str, chunks: list[RetrievedChunk], cfg: Config, facts: list[dict] | None = None
+) -> tuple[list[GradedChunk], list[float]]:
+    """Grade every chunk - and any database facts - in ONE call.
 
     Config calls this out directly: Groq's free tier caps at 8K tokens/minute,
     and N separate calls resend the full instructions N times - at this scale
     that overhead is most of the budget, not the actual chunk content being
     graded. One call, one JSON array back, is what `batch_grading: true` means.
+
+    Facts are graded with the passages so a number has to earn its place
+    like any passage: "iPhone revenue" is a real fact but no answer to "how
+    many iPhone units". Returns (graded chunks, one score per fact).
     """
-    if not chunks:
-        return []
+    facts = facts or []
+    n = len(chunks) + len(facts)
+    if n == 0:
+        return [], []
 
-    client = get_groq_client(cfg)
-    passages = "\n\n".join(f"[{i}] {c.chunk.text}" for i, c in enumerate(chunks))
-    prompt = _GRADE_PROMPT.format(question=query, passages=passages, n=len(chunks))
+    items = [f"[{i}] {c.chunk.text}" for i, c in enumerate(chunks)]
+    items += [f"[S{i}] {describe_fact(f)}" for i, f in enumerate(facts, start=1)]
+    prompt = _GRADE_PROMPT.format(question=query, passages="\n\n".join(items), n=n)
 
-    resp = client.chat.completions.create(
+    resp = get_groq_client(cfg).chat.completions.create(
         model=cfg.generation.utility_model,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=cfg.generation.utility_max_tokens,
         temperature=0.0,
+        # Same fix as rewrite_query: without it the model can spend its whole
+        # token budget thinking and return nothing.
+        reasoning_effort=cfg.generation.utility_effort,
         response_format={
             "type": "json_schema",
-            "json_schema": {"name": "chunk_grades", "schema": _GRADE_SCHEMA},
+            # strict: Groq guarantees the reply matches the schema. Without
+            # it, the reply can be invalid JSON.
+            "json_schema": {"name": "chunk_grades", "schema": _GRADE_SCHEMA, "strict": True},
         },
     )
 
-    parsed = json.loads(resp.choices[0].message.content)
-    grades = parsed["grades"]
+    try:
+        grades = json.loads(resp.choices[0].message.content or "")["grades"]
+        grades = [{"relevance": _clamp(g.get("relevance")), "reason": str(g.get("reason", ""))} for g in grades]
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+        # Unreadable reply: fail every item rather than crash. The question
+        # is then refused honestly ("0 relevant") instead of erroring out.
+        grades = [{"relevance": 0.0, "reason": "grader failed"}] * n
 
-    if len(grades) != len(chunks):
-        # The model didn't return one grade per passage as instructed. Treat
-        # every ungraded chunk as failing rather than guess which one it
+    if len(grades) != n:
+        # The model didn't return one grade per item as instructed. Treat
+        # every ungraded item as failing rather than guess which one it
         # meant - a wrong guess here silently corrupts every score above it.
-        grades = (grades + [{"relevance": 0.0, "reason": "ungraded"}] * len(chunks))[
-            : len(chunks)
-        ]
+        grades = (grades + [{"relevance": 0.0, "reason": "ungraded"}] * n)[:n]
 
-    return [
+    graded = [
         GradedChunk(retrieved=c, relevance=g["relevance"], reason=g["reason"])
         for c, g in zip(chunks, grades)
     ]
+    return graded, [g["relevance"] for g in grades[len(chunks):]]
 
 
 # --- Step 2: rewrite the query when grading comes back weak ----------------
@@ -187,33 +218,38 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
     # Run it once, up front, regardless of how the narrative loop below goes.
     structured_facts = get_structured_facts(query, conf)
 
-    # A resolved, non-ambiguous structured fact IS sufficient evidence to
-    # answer on its own - it's an exact number from the filing, not a guess.
-    # Without this, a question like "total shareholders' equity" could find
-    # the exact right number here and still get marked succeeded=False just
-    # because the narrative search (checked below) didn't separately find
-    # 2+ chunks that restate that number in prose - which most balance-sheet
-    # figures never do.
-    has_clean_structured_fact = bool(structured_facts) and not any(
-        f.get("ambiguous") or f.get("year_unspecified") or f.get("year_not_found")
-        for f in structured_facts
-    )
+    # Facts with a real value get graded like passages (on attempt 1, against
+    # the original question). Flagged ones (ambiguous, no year...) have no
+    # number to grade; they pass through untouched for Layer 5 to see.
+    clean_facts = [f for f in structured_facts if "value" in f]
+    flagged_facts = [f for f in structured_facts if "value" not in f]
+    relevant_facts: list[dict] = []
+    fact_scores: list[float] = []
 
     attempts: list[AttemptRecord] = []
     current_query = query
     prev_chunk_ids: set[str] | None = None
     graded: list[GradedChunk] = []
+    best: tuple[int, float, list[GradedChunk], str] | None = None  # (n_relevant, mean, chunks, query)
 
     for attempt_num in range(1, sh.max_attempts + 1):
         retrieved = hybrid_retrieve(current_query, conf)
-        graded = grade_chunks(current_query, retrieved, conf)
+        if attempt_num == 1:
+            graded, fact_scores = grade_chunks(current_query, retrieved, conf, clean_facts)
+            # A fact that doesn't answer the question isn't passed on: iPhone
+            # revenue graded low for "iPhone units" never reaches Layer 5.
+            relevant_facts = [
+                {**f, "_relevance": s}
+                for f, s in zip(clean_facts, fact_scores)
+                if s >= sh.relevance_threshold
+            ]
+        else:
+            graded, _ = grade_chunks(current_query, retrieved, conf)
 
-        # Read the threshold from config here rather than trust
-        # GradedChunk.is_relevant's own hardcoded 0.5 - that property and this
-        # config value happen to agree today, but only one of them is the
-        # actual source of truth, and it's this one.
         chunk_ids = {g.retrieved.chunk.chunk_id for g in graded}
-        n_relevant = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
+        n_relevant_chunks = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
+        # Relevant facts count as evidence just like relevant passages.
+        n_relevant = n_relevant_chunks + len(relevant_facts)
         mean_relevance = sum(g.relevance for g in graded) / len(graded) if graded else 0.0
 
         stagnated = (
@@ -227,47 +263,62 @@ def self_heal(query: str, cfg: Config | None = None) -> RetrievalOutcome:
                 query=current_query,
                 strategy="original" if attempt_num == 1 else "rewrite",
                 n_retrieved=len(retrieved),
-                n_relevant=n_relevant,
+                n_relevant=n_relevant_chunks,
                 mean_relevance=mean_relevance,
                 chunk_ids=sorted(chunk_ids),
                 stagnated=stagnated,
+                note=(
+                    f"{len(relevant_facts)} of {len(clean_facts)} database facts relevant"
+                    if clean_facts else ""
+                ),
             )
         )
 
-        # One very strong chunk is enough on its own: some answers sit in a
-        # single paragraph, and requiring a second chunk made the result
-        # depend on how a weaker, only loosely related chunk was graded.
-        has_strong_chunk = any(g.relevance >= sh.strong_chunk_threshold for g in graded)
+        if best is None or (n_relevant_chunks, mean_relevance) > best[:2]:
+            best = (n_relevant_chunks, mean_relevance, graded, current_query)
 
-        if n_relevant >= sh.min_relevant_chunks or has_strong_chunk or has_clean_structured_fact:
-                return RetrievalOutcome(
+        # One very strong item is enough on its own: some answers sit in a
+        # single paragraph (or a single figure), and requiring a second one
+        # made the result depend on how a weaker, loosely related item graded.
+        scores = [g.relevance for g in graded] + [f["_relevance"] for f in relevant_facts]
+        has_strong = any(s >= sh.strong_chunk_threshold for s in scores)
+
+        if n_relevant >= sh.min_relevant_chunks or has_strong:
+            return RetrievalOutcome(
                 original_query=query,
                 final_query=current_query,
                 succeeded=True,
                 chunks=graded,
                 attempts=attempts,
-                structured_facts=structured_facts,
+                structured_facts=relevant_facts + flagged_facts,
                 relevance_threshold=sh.relevance_threshold,
             )
 
         if stagnated:
             break  # rewriting again would just burn the remaining attempts for nothing
 
+        # Nothing on the first try even comes close: the filing almost
+        # certainly doesn't cover this, and rewording rarely rescues it.
+        # Saves two rewrites (~40 s) on questions that end in a refusal anyway.
+        if attempt_num == 1 and max(scores + fact_scores, default=0.0) < sh.give_up_below:
+            break
+
         prev_chunk_ids = chunk_ids
         if attempt_num < sh.max_attempts:
             current_query = rewrite_query(query, current_query, graded, conf)
 
-    n_relevant_final = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
+    # Abstain with the BEST attempt's evidence, not just the last one's.
+    best_n, _, best_chunks, best_query = best
     return RetrievalOutcome(
         original_query=query,
-        final_query=current_query,
+        final_query=best_query,
         succeeded=False,
         abstain_reason=(
-            f"only {n_relevant_final} relevant chunk(s) found "
-            f"after {len(attempts)} attempt(s) (need {sh.min_relevant_chunks})"
+            f"only {best_n} relevant chunk(s) found after {len(attempts)} attempt(s) "
+            f"(need {sh.min_relevant_chunks}, or one scoring {sh.strong_chunk_threshold}+)"
         ),
-        chunks=graded,
+        chunks=best_chunks,
         attempts=attempts,
-        structured_facts=structured_facts,
+        structured_facts=relevant_facts + flagged_facts,
         relevance_threshold=sh.relevance_threshold,
     )
