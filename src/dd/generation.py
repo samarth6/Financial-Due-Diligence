@@ -371,6 +371,17 @@ def _confidence(
 # --- Entry point -------------------------------------------------------
 
 
+def _model_failed(query: str, exc: Exception, outcome: RetrievalOutcome | None = None) -> Answer:
+    """A rate limit, an outage or an unreadable reply is said plainly
+    instead of crashing the command."""
+    return Answer(
+        query=query,
+        answered=False,
+        text=f"Model call failed ({type(exc).__name__}). Try again in a minute.",
+        outcome=outcome,
+    )
+
+
 def generate_answer(
     outcome: RetrievalOutcome, cfg: Config | None = None, on_progress: ProgressFn | None = None
 ) -> Answer:
@@ -386,7 +397,10 @@ def generate_answer(
     facts = _clean_facts(outcome)
     evidence, lookup = _build_evidence(chunks, facts)
     emit(on_progress, "write", passages=len(chunks), facts=len(facts))
-    result = _ask_model(query, evidence, conf)
+    try:
+        result = _ask_model(query, evidence, conf)
+    except Exception as exc:  # noqa: BLE001 - rate limit, outage, unreadable reply
+        return _model_failed(query, exc, outcome)
 
     # Refusal 2: the evidence is on-topic but doesn't answer what was asked.
     if not result["answerable"]:
@@ -434,6 +448,11 @@ def answer(query: str, cfg: Config | None = None, on_progress: ProgressFn | None
     """
     conf = cfg or get_config()
     start = time.perf_counter()
-    result = generate_answer(self_heal(query, conf, on_progress), conf, on_progress)
+    try:
+        outcome = self_heal(query, conf, on_progress)
+    except Exception as exc:  # noqa: BLE001 - Layer 4's grader and rewriter call Groq too
+        result = _model_failed(query, exc)
+    else:
+        result = generate_answer(outcome, conf, on_progress)
     result.elapsed_s = round(time.perf_counter() - start, 2)
     return result
