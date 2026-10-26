@@ -1,14 +1,19 @@
 import { ACTION_LABELS, WithMarkers, stepLabel, timeOf } from "../format.jsx";
 
-function Confidence({ confidence }) {
+function Confidence({ confidence, citations }) {
   if (!confidence) return null;
   const c = confidence;
+  // An answer citing a database figure ([S1]) gets its score from that figure,
+  // not from the three search signals, so showing them would only confuse.
+  const fromFigures = citations.some((cit) => cit.marker.startsWith("[S"));
   return (
     <div className="confidence">
       <span className={`band band-${c.band}`}>{c.band.toUpperCase()} confidence ({c.score})</span>
-      <span className="muted small">
-        {" "}both searches agreed {c.hybrid_agreement} - reranker {c.rerank_strength} - first-try {c.loop_cleanliness}
-      </span>
+      {!fromFigures && (
+        <span className="muted small">
+          {" "}both searches agreed {c.hybrid_agreement} - reranker {c.rerank_strength} - first-try {c.loop_cleanliness}
+        </span>
+      )}
       {c.notes?.length > 0 && (
         <ul className="notes">
           {c.notes.map((n, i) => <li key={i}>{n}</li>)}
@@ -76,7 +81,7 @@ export default function QuestionCard({ item, actions, actionPending, onPropose }
             </ul>
           )}
 
-          <Confidence confidence={a.confidence} />
+          <Confidence confidence={a.confidence} citations={a.citations} />
           <div className="muted small">{a.elapsed_s}s, {a.attempts.length} search attempt(s)</div>
 
           {a.passages.length > 0 && (
@@ -85,9 +90,15 @@ export default function QuestionCard({ item, actions, actionPending, onPropose }
               <ul className="passages">
                 {a.passages.map((p, i) => (
                   <li key={i}>
-                    <span className={p.relevance >= 0.5 ? "rel rel-yes" : "rel"}>{p.relevance.toFixed(2)}</span>{" "}
+                    <span
+                      className={p.relevance >= 0.5 ? "rel rel-yes" : "rel"}
+                      title="How well the grader judged this passage answers the question (0-1). Not the answer's confidence."
+                    >
+                      relevance {p.relevance.toFixed(2)}
+                    </span>{" "}
                     <strong>{p.where}</strong>
-                    <div className="small">{p.snippet}...</div>
+                    {/* Tables are drawn with long runs of "─"; drop them so they don't run off the card. */}
+                    <div className="small">{p.snippet.replace(/─{3,}/g, " ")}...</div>
                     <div className="muted small">grader: {p.reason}</div>
                   </li>
                 ))}
