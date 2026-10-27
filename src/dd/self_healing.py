@@ -11,12 +11,13 @@ most RAG systems skip this and hallucinate confidently on bad retrieval.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from groq import Groq
 
 from .config import Config, get_config, get_secrets
-from .models import AttemptRecord, GradedChunk, RetrievalOutcome, RetrievedChunk
+from .models import AttemptRecord, Chunk, GradedChunk, RetrievalOutcome, RetrievedChunk
 from .retrieval import hybrid_retrieve
 from .structured import describe_fact, get_structured_facts
 
@@ -48,10 +49,11 @@ _GRADE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "item": {"type": "string"},
                     "relevance": {"type": "number"},
                     "reason": {"type": "string"},
                 },
-                "required": ["relevance", "reason"],
+                "required": ["item", "relevance", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -69,14 +71,36 @@ Question: {question}
 Evidence:
 {passages}
 
+After its marker, each passage shows where it sits in the filing, in \
+parentheses. Read the \
+WHOLE passage, not just its first sentence: a passage can open with the end \
+of an unrelated paragraph and still answer the question further on.
+
 Items marked [S1], [S2]... are figures from the financial statements. A \
 figure is relevant only if it is one of the numbers needed to answer the \
 question - the right measure, not just the right topic (revenue in dollars \
 is not "units sold").
 
-For EACH item, in order, give a relevance score from 0.0 (does not answer \
-the question) to 1.0 (directly answers it), and a one-sentence reason.
-Return exactly {n} grades, in the same order as the items."""
+Score each item on its own, on this scale:
+1.0 - states exactly what was asked: the right company, measure and period.
+{strong} - contains the answer, but one small step is needed (e.g. picking \
+the right year column of a table, or the answer is not the passage's main \
+point).
+{relevant} - has part of what is needed: one of several things asked for, \
+or the right measure for a different period.
+{weak} - same area, but none of the information asked for.
+0.0 - unrelated.
+Use a value in between when an item falls between two steps.
+
+For EACH item give its marker exactly as shown (e.g. "[0]" or "[S1]"), its \
+score and a one-sentence reason. Return exactly {n} grades, one per item."""
+
+
+def _where(c: Chunk) -> str:
+    """Where a passage sits in the filing, e.g. "Item 8 / CONSOLIDATED
+    BALANCE SHEETS" - a table of bare numbers can't be judged without it.
+    The reranker (retrieval.py) is given the same context."""
+    return f"{c.item} / {c.subsection or c.section}"
 
 
 def _clamp(x: object) -> float:
@@ -86,6 +110,13 @@ def _clamp(x: object) -> float:
         return max(0.0, min(1.0, float(x)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _marker(item: object) -> str:
+    """The marker a grade names: "[0]" -> "0", "[S1]" / "s1" -> "S1".
+    Anything unrecognisable -> "" (matches no item)."""
+    m = re.search(r"\b(S?\d+)\b", str(item or "").upper())
+    return m.group(1) if m else ""
 
 
 def grade_chunks(
@@ -107,9 +138,17 @@ def grade_chunks(
     if n == 0:
         return [], []
 
-    items = [f"[{i}] {c.chunk.text}" for i, c in enumerate(chunks)]
+    items = [f"[{i}] ({_where(c.chunk)}) {c.chunk.text}" for i, c in enumerate(chunks)]
     items += [f"[S{i}] {describe_fact(f)}" for i, f in enumerate(facts, start=1)]
-    prompt = _GRADE_PROMPT.format(question=query, passages="\n\n".join(items), n=n)
+    # The scale's steps are the thresholds self_heal() decides with, so a
+    # score means the same thing to the grader as it does to the code.
+    sh = cfg.self_healing
+    prompt = _GRADE_PROMPT.format(
+        question=query, passages="\n\n".join(items), n=n,
+        strong=f"{sh.strong_chunk_threshold:g}",
+        relevant=f"{sh.relevance_threshold:g}",
+        weak=f"{sh.give_up_below:g}",
+    )
 
     resp = get_groq_client(cfg).chat.completions.create(
         model=cfg.generation.utility_model,
@@ -127,19 +166,26 @@ def grade_chunks(
         },
     )
 
+    markers = [f"{i}" for i in range(len(chunks))] + [f"S{i}" for i in range(1, len(facts) + 1)]
     try:
-        grades = json.loads(resp.choices[0].message.content or "")["grades"]
-        grades = [{"relevance": _clamp(g.get("relevance")), "reason": str(g.get("reason", ""))} for g in grades]
+        reply = json.loads(resp.choices[0].message.content or "")["grades"]
+        # Match each grade to its item by the marker the model wrote, never by
+        # position: the model can list correct grades in the wrong order, and
+        # matching by position would then hand them to the wrong passages.
+        by_marker: dict[str, dict] = {}
+        for g in reply:
+            m = _marker(g.get("item"))
+            if m in markers and m not in by_marker:
+                by_marker[m] = {"relevance": _clamp(g.get("relevance")), "reason": str(g.get("reason", ""))}
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
         # Unreadable reply: fail every item rather than crash. The question
         # is then refused honestly ("0 relevant") instead of erroring out.
-        grades = [{"relevance": 0.0, "reason": "grader failed"}] * n
+        by_marker = {m: {"relevance": 0.0, "reason": "grader failed"} for m in markers}
 
-    if len(grades) != n:
-        # The model didn't return one grade per item as instructed. Treat
-        # every ungraded item as failing rather than guess which one it
-        # meant - a wrong guess here silently corrupts every score above it.
-        grades = (grades + [{"relevance": 0.0, "reason": "ungraded"}] * n)[:n]
+    # An item the model skipped fails rather than borrowing a guess - a wrong
+    # guess here silently corrupts the scores. If it graded one twice, the
+    # first grade counts.
+    grades = [by_marker.get(m, {"relevance": 0.0, "reason": "ungraded"}) for m in markers]
 
     graded = [
         GradedChunk(retrieved=c, relevance=g["relevance"], reason=g["reason"])
