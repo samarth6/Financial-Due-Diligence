@@ -145,6 +145,8 @@ details { margin-top: 0.5rem; }
 summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; }
 .passages { padding-left: 1.1rem; }
 .passages li { margin: 0.5rem 0; overflow-wrap: anywhere; }
+.passage-text { white-space: pre-wrap; }
+.passage-text button.link { font-size: inherit; text-decoration: underline; }
 .rel { display: inline-block; padding: 0 0.35rem; text-align: center; border-radius: 4px; background: var(--bad-soft); color: var(--bad); font-size: 0.8rem; }
 .rel-yes { background: var(--good-soft); color: var(--good); }
 .action-buttons { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.75rem; }
