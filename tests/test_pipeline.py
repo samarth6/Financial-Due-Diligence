@@ -56,23 +56,28 @@ class FakeGroq:
 
     def __init__(self, fact_grades: dict[str, float] | None = None,
                  answer: dict | None = None, fail: str | None = None,
-                 unreadable_grades: bool = False) -> None:
+                 unreadable_grades: bool = False, shuffle_grades: bool = False) -> None:
         self.fact_grades = fact_grades or {}
         self.answer = answer or {"answerable": True, "answer": "Tariffs could hurt margins [1].", "citations": ["[1]"]}
         self.fail = fail
         self.unreadable_grades = unreadable_grades
+        self.shuffle_grades = shuffle_grades  # list grades in reverse order, as a real model sometimes does
         self.rewrites = 0
+        self.prompts: dict[str, list[str]] = {}  # call kind -> prompts sent, in order
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
         fmt = kwargs.get("response_format")
         kind = fmt["json_schema"]["name"] if fmt else "rewrite"
+        self.prompts.setdefault(kind, []).append(kwargs["messages"][0]["content"])
         if kind == self.fail:
             raise RuntimeError("rate limit exceeded")
         if kind == "chunk_grades":
-            content = "not json at all" if self.unreadable_grades else json.dumps(
-                {"grades": [{"relevance": self._grade(item), "reason": "test"}
-                            for item in self._items(kwargs["messages"][0]["content"])]})
+            grades = [{"item": marker, "relevance": self._grade(item), "reason": "test"}
+                      for marker, item in self._items(kwargs["messages"][0]["content"])]
+            if self.shuffle_grades:
+                grades.reverse()
+            content = "not json at all" if self.unreadable_grades else json.dumps({"grades": grades})
         elif kind == "grounded_answer":
             content = json.dumps(self.answer)
         else:
@@ -81,8 +86,9 @@ class FakeGroq:
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
 
     @staticmethod
-    def _items(prompt: str) -> list[str]:
-        return re.findall(r"^\[S?\d+\] (.+)$", prompt, flags=re.MULTILINE)
+    def _items(prompt: str) -> list[tuple[str, str]]:
+        """(marker, text) for each item, e.g. ("[0]", "(Item 1A / ...) passage a1-0 grade=0.9")."""
+        return re.findall(r"^(\[S?\d+\]) (.+)$", prompt, flags=re.MULTILINE)
 
     def _grade(self, item: str) -> float:
         if m := re.search(r"grade=([\d.]+)", item):
@@ -172,6 +178,59 @@ def test_stops_when_rewording_finds_the_same_passages(world):
     outcome = sh.self_heal("question?", on_progress=lambda s, d: events.append((s, d)))
     assert not outcome.succeeded and len(outcome.attempts) == 2
     assert stages(events)[-1] == "stagnated"
+
+
+def test_the_grader_gets_the_scale_headings_and_whole_passage_rule(world):
+    """The scale's steps must be the thresholds self_heal() decides with, and
+    each passage must arrive with where it sits in the filing."""
+    groq = FakeGroq()
+    retrieved = passages("a1", 0.9)
+    retrieved[0].chunk.subsection = "CONSOLIDATED BALANCE SHEETS"
+    world([retrieved + passages("a2", 0.6)], groq=groq)
+    sh.self_heal("total assets?")
+    prompt = groq.prompts["chunk_grades"][0]
+
+    assert "[0] (Item 1A / CONSOLIDATED BALANCE SHEETS) passage a1-0" in prompt
+    assert "[1] (Item 1A / Risk Factors) passage a2-0" in prompt, "no subsection: falls back to the section"
+    for score in (CFG.strong_chunk_threshold, CFG.relevance_threshold, CFG.give_up_below):
+        assert f"\n{score:g} - " in prompt
+    assert "WHOLE passage" in prompt
+
+
+def test_grades_are_matched_by_marker_not_position(world):
+    """A real model once listed correct grades in the wrong order; matched by
+    position, the passage holding the answer got the score of the one without."""
+    world([passages("a1", 0.9, 0.1, 0.6)],
+          facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.7}, shuffle_grades=True))
+    outcome = sh.self_heal("question?")
+    assert [g.relevance for g in outcome.chunks] == [0.9, 0.1, 0.6]
+    assert outcome.structured_facts[0]["_relevance"] == 0.7
+
+
+def test_an_item_the_grader_skipped_counts_as_ungraded(world, monkeypatch):
+    groq = FakeGroq()
+    real = groq._create
+
+    def drop_item_1(**kwargs):
+        resp = real(**kwargs)
+        if kwargs.get("response_format"):
+            body = json.loads(resp.choices[0].message.content)
+            body["grades"] = [g for g in body["grades"] if g["item"] != "[1]"]
+            resp.choices[0].message.content = json.dumps(body)
+        return resp
+
+    groq.chat.completions.create = drop_item_1
+    world([passages("a1", 0.9, 0.9)], groq=groq)
+    outcome = sh.self_heal("question?")
+    assert [(g.relevance, g.reason) for g in outcome.chunks] == [(0.9, "test"), (0.0, "ungraded")]
+
+
+@pytest.mark.parametrize("written, expected", [
+    ("[0]", "0"), ("0", "0"), ("Item [2]", "2"), ("[S1]", "S1"), ("s1", "S1"), ("", ""), (None, ""),
+])
+def test_markers_are_read_however_the_model_writes_them(written, expected):
+    assert sh._marker(written) == expected
 
 
 def test_an_unreadable_grader_reply_refuses_instead_of_crashing(world):

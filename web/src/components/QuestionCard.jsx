@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ACTION_LABELS, WithMarkers, stepLabel, timeOf } from "../format.jsx";
 
 function Confidence({ confidence, citations }) {
@@ -19,6 +20,28 @@ function Confidence({ confidence, citations }) {
           {c.notes.map((n, i) => <li key={i}>{n}</li>)}
         </ul>
       )}
+    </div>
+  );
+}
+
+// The start of a passage, with "more" to read all of it in place. The full
+// text keeps one table row per line; the short version is one running line,
+// minus the long "─" rules tables are drawn with.
+function PassageText({ passage }) {
+  const [open, setOpen] = useState(false);
+  const full = passage.text;
+  const short = passage.snippet.replace(/─{3,}/g, " ");
+  // Old answers (asked before the full text was sent) have no `text`.
+  if (!full) return <div className="small">{short}...</div>;
+  if (short.length >= full.replace(/\s+/g, " ").length) {
+    return <div className="small passage-text">{full}</div>;
+  }
+  return (
+    <div className="small passage-text">
+      {open ? full : `${short}...`}
+      <button type="button" className="link" onClick={() => setOpen(!open)} aria-expanded={open}>
+        {open ? "less" : "more"}
+      </button>
     </div>
   );
 }
@@ -97,8 +120,7 @@ export default function QuestionCard({ item, actions, actionPending, onPropose }
                       relevance {p.relevance.toFixed(2)}
                     </span>{" "}
                     <strong>{p.where}</strong>
-                    {/* Tables are drawn with long runs of "─"; drop them so they don't run off the card. */}
-                    <div className="small">{p.snippet.replace(/─{3,}/g, " ")}...</div>
+                    <PassageText passage={p} />
                     <div className="muted small">grader: {p.reason}</div>
                   </li>
                 ))}

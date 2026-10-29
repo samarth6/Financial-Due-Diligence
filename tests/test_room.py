@@ -258,6 +258,20 @@ def test_a_failed_question_is_reported_and_the_room_keeps_going(fakes):
     run(scenario())
 
 
+def test_full_passage_text_keeps_table_rows_but_drops_padding():
+    table = (
+        "Total assets          $          359,241      $          364,980\n"
+        "────────────────────────────\n"
+        "\n"
+        "  Total liabilities                 285,508               308,030  "
+    )
+    assert room_mod.readable(table) == (
+        "Total assets   $   359,241   $   364,980\n"
+        "Total liabilities   285,508   308,030"
+    )
+    assert room_mod.readable("Net sales grew. Services rose.") == "Net sales grew. Services rose."
+
+
 # --- actions: everyone present must approve ---------------------------------------
 
 

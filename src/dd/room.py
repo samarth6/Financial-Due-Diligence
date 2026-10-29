@@ -32,6 +32,7 @@ an async `send_json(dict)` method. server.py does the networking.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
@@ -88,10 +89,19 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def readable(text: str) -> str:
+    """A passage as people read it: one table row per line, columns kept apart
+    by three spaces. The filing pads its table columns with dozens of spaces
+    and draws rules with ─ - layout only, and most of a table chunk's size."""
+    lines = (re.sub(r"\s{2,}", "   ", line.replace("─", " ").strip()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def answer_view(a: Answer) -> dict[str, Any]:
     """What the browser needs from an Answer - plain JSON, no internals.
     `passages` is every passage Layer 4 graded, best first, so the team sees
-    the search results behind the answer and not only the answer."""
+    the search results behind the answer and not only the answer: a short
+    `snippet` for the list and the full `text` to open."""
     passages = []
     if a.outcome is not None:
         for g in sorted(a.outcome.chunks, key=lambda g: g.relevance, reverse=True):
@@ -101,6 +111,7 @@ def answer_view(a: Answer) -> dict[str, Any]:
                 "relevance": round(g.relevance, 2),
                 "reason": g.reason,
                 "snippet": " ".join(c.text.split())[:300],
+                "text": readable(c.text),
             })
     cf = a.confidence
     return {
