@@ -87,6 +87,7 @@ class RetrievalCfg(BaseModel):
     rrf_k: int = 60
     rerank_candidates: int = 25
     final_top_k: int = 6
+    keep_if_both_top: int = 5
 
 
 class RerankerCfg(BaseModel):

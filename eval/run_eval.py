@@ -55,6 +55,8 @@ RESULTS = EVAL_DIR / "results.jsonl"
 REVIEW = EVAL_DIR / "review.md"
 
 AUTO_TYPES = {"numeric_lookup", "no_answer"}
+# Start of the text generation.py returns when a Groq call fails.
+MODEL_FAILED = "Model call failed"
 
 # --- scoring ---------------------------------------------------------------
 
@@ -214,6 +216,12 @@ def run(types: set[str] | None, repeat: int) -> list[dict]:
             except Exception as exc:  # noqa: BLE001 - one failure shouldn't end the run
                 # Not saved, so the next run retries it. Usually a rate limit.
                 print(f"    ERROR (will retry next run): {type(exc).__name__}: {exc}")
+                continue
+            if a.text.startswith(MODEL_FAILED):
+                # Layer 5 reports a failed model call as a refusal instead of
+                # crashing. That is not an answer: saved, it would score as a
+                # correct refusal on no_answer questions. Skip it and retry.
+                print(f"    ERROR (will retry next run): {a.text}")
                 continue
 
             result = {

@@ -137,6 +137,8 @@ def _ask_model(question: str, evidence: str, cfg: Config) -> dict:
 # --- Step 3: check which citations are real ---------------------------------
 
 _MARKER_RE = re.compile(r"\[S?\d+\]")
+# A new sentence starts after . ! or ? and a space.
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 def _check_citations(
@@ -233,16 +235,26 @@ def _allowed_values(cited: list[GradedChunk | dict]) -> list[float]:
         for combo in itertools.combinations(fact_values, r):
             for signs in itertools.product((1, -1), repeat=r):
                 allowed.append(abs(sum(s * v for s, v in zip(signs, combo))))
+    # The same figures restated in millions or billions without the unit, as
+    # 10-K tables do: "(285,508 + 73,733 = 359,241)" checks the balance sheet
+    # with Total liabilities 285,508,000,000 written in millions.
+    allowed += [v / 1e6 for v in allowed] + [v / 1e9 for v in allowed]
     for a, b in itertools.permutations(fact_values, 2):
         if a:
             allowed.append(abs(b - a) / abs(a) * 100)  # % change, either direction
 
-    for g in cited:
-        if not isinstance(g, dict):
-            # Every number in the passage, including bare table cells ("112,010").
-            for digits in re.findall(r"\d[\d,]*(?:\.\d+)?", g.retrieved.chunk.text):
-                v = float(digits.rstrip(",.").replace(",", ""))
-                allowed += [v, v * 1e6, v * 1e9]
+    # Passages: every number in their text, including bare table cells
+    # ("112,010"), plus the difference and sum of any two - "a decrease of
+    # $1,319" is $37,005 minus $35,686 from the same passage.
+    numbers = [
+        float(d.rstrip(",.").replace(",", ""))
+        for g in cited if not isinstance(g, dict)
+        for d in re.findall(r"\d[\d,]*(?:\.\d+)?", g.retrieved.chunk.text)
+    ]
+    pairs = list(itertools.combinations(numbers, 2))
+    numbers += [abs(a - b) for a, b in pairs] + [a + b for a, b in pairs]
+    for v in numbers:
+        allowed += [v, v * 1e6, v * 1e9]
     return allowed
 
 
@@ -428,8 +440,22 @@ def generate_answer(
             outcome=outcome,
         )
 
+    # The citations list says which sources were used; the text must also show
+    # where. A one-sentence answer can only come from its cited sources, so the
+    # markers go on its end. A longer one could mix them up - leave it as it
+    # is, but don't call it HIGH.
+    untied = not _MARKER_RE.search(text)
+    if untied and len(_SENTENCE_RE.split(text)) == 1:
+        markers = "".join(c.marker for c in citations)
+        text = f"{text[:-1]} {markers}." if text.endswith(".") else f"{text} {markers}"
+        untied = False
+
     confidence = _confidence(outcome, text, citations, lookup, conf)
     confidence.notes = notes + confidence.notes
+    if untied:
+        confidence.score = min(confidence.score, conf.confidence.bands.high - 0.01)
+        confidence.band = _band(confidence.score, conf)
+        confidence.notes.append("sources are not tied to specific sentences - check them before relying on it")
     return Answer(
         query=query,
         answered=True,
