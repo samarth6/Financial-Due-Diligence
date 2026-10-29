@@ -284,10 +284,15 @@ def _print_answer(a) -> None:
         console.print(f"  {c.marker} {c.source}")
     cf = a.confidence
     console.print()
-    console.print(
-        f"[bold]confidence:[/] {cf.band.upper()} ({cf.score})  "
-        f"hybrid={cf.hybrid_agreement} rerank={cf.rerank_strength} loop={cf.loop_cleanliness}"
-    )
+    # Answers citing a database figure ([S1]...) are scored from the figures,
+    # not these three search measures - printing them would read as "0 = failed".
+    if any(c.marker.startswith("[S") for c in a.citations):
+        console.print(f"[bold]confidence:[/] {cf.band.upper()} ({cf.score})")
+    else:
+        console.print(
+            f"[bold]confidence:[/] {cf.band.upper()} ({cf.score})  "
+            f"hybrid={cf.hybrid_agreement} rerank={cf.rerank_strength} loop={cf.loop_cleanliness}"
+        )
     for n in cf.notes:
         console.print(f"  note: {n}")
     console.print(f"[dim]({a.elapsed_s}s)[/]")

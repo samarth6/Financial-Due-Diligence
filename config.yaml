@@ -49,6 +49,9 @@ retrieval:
   rerank_candidates: 25
   # How many reranked chunks are handed to Layer 4.
   final_top_k: 6
+  # A chunk BOTH searches rank in their top N is kept even if the reranker
+  # scores it low (it cut the MD&A tariff passage: vector #2, BM25 #4).
+  keep_if_both_top: 5
 
 reranker:
   model: BAAI/bge-reranker-large

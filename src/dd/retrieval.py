@@ -146,6 +146,39 @@ def hybrid_retrieve(query: str, cfg: Config | None = None) -> list[RetrievedChun
         for cid in shortlist_ids
         if cid in by_id  # defensive: a stale index could reference a dropped chunk
     ]
+    candidates = _drop_duplicates(candidates)
 
     reranked = rerank(query, candidates, conf)
-    return reranked[: r.final_top_k]
+
+    # The reranker picks the final passages - it reads each one WITH the
+    # question, so it reliably throws out boilerplate that merely shares words
+    # with it ("Available Information", the signature page). One exception: a
+    # passage BOTH searches rank in their top few is always kept. On the
+    # tariffs question the reranker scored the MD&A tariff passage 0.0005
+    # although it was vector #2 and BM25 #4, and cut it. (Giving the searches
+    # a full vote instead let boilerplate in and broke the cybersecurity
+    # question.)
+    top = r.keep_if_both_top
+    agreed = [
+        c for c in reranked
+        if c.vector_rank is not None and c.vector_rank <= top
+        and c.bm25_rank is not None and c.bm25_rank <= top
+    ][: r.final_top_k]
+    rest = [c for c in reranked if c not in agreed]
+    final = agreed + rest[: r.final_top_k - len(agreed)]
+    return sorted(final, key=lambda c: c.rerank_score, reverse=True)
+
+
+def _drop_duplicates(candidates: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """The 10-K repeats some paragraphs word for word (e.g. Item 1 and Item 8
+    both describe component supply). Each copy is its own chunk, and two
+    copies took two of the six final slots. Keep the first, i.e. the one
+    ranked higher by the searches."""
+    seen: set[str] = set()
+    out = []
+    for c in candidates:
+        key = " ".join(c.chunk.text.split()).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out

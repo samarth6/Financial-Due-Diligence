@@ -283,3 +283,80 @@ def test_a_refusal_from_layer_4_is_passed_through(world):
     world([passages("a1", 0.05)])
     a = gen.answer("FY2027 projections?")
     assert not a.answered and "relevant chunk" in a.text
+
+
+# --- citation markers in the answer text ---------------------------------------
+# Eval run on 5c78bb0: EPS, operating cash and iPhone revenue had the right
+# number, [S1] in the citations list, but no marker in the text - and HIGH.
+
+
+def test_one_sentence_answer_without_markers_gets_its_citations(world):
+    world([passages("a1", 0.1)], facts=[fact("iPhone", 209_586e6)],
+          groq=FakeGroq(fact_grades={"iPhone": 0.9},
+                        answer={"answerable": True, "answer": "$209,586,000,000.", "citations": ["[S1]"]}))
+    a = gen.answer("iPhone revenue FY2025?")
+    assert a.text == "$209,586,000,000 [S1].", "a single sentence can only come from its cited sources"
+    assert a.confidence.band == "high"
+
+
+def test_longer_answer_without_markers_is_kept_below_high(world):
+    world([passages("a1", 0.1)], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.9},
+                        answer={"answerable": True,
+                                "answer": "Net income was $112,010,000,000. That was a record year.",
+                                "citations": ["[S1]"]}))
+    a = gen.answer("net income FY2025?")
+    assert "[S1]" not in a.text, "with two sentences we can't tell which one the source backs"
+    assert a.confidence.band != "high"
+    assert any("not tied to" in n for n in a.confidence.notes)
+
+
+def test_answer_with_markers_is_left_alone(world):
+    world([passages("a1", 0.1)], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.9},
+                        answer={"answerable": True, "answer": "Net income was $112,010,000,000 [S1].",
+                                "citations": ["[S1]"]}))
+    a = gen.answer("net income FY2025?")
+    assert a.text == "Net income was $112,010,000,000 [S1]." and a.confidence.band == "high"
+
+
+
+# --- the number check ------------------------------------------------------------
+# Eval run: two correct answers were capped LOW (0.44) as "number not found".
+
+
+def _no_number_warning(a) -> bool:
+    return not any("not found in cited sources" in n for n in a.confidence.notes)
+
+
+def test_figures_restated_in_millions_are_recognised(world):
+    facts = [fact("Total assets", 359_241e6, "balance_sheet"),
+             fact("Total liabilities", 285_508e6, "balance_sheet"),
+             fact("Total shareholders equity", 73_733e6, "balance_sheet")]
+    world([passages("a1", 0.1)], facts=facts,
+          groq=FakeGroq(fact_grades={"Total": 0.9}, answer={
+              "answerable": True, "citations": ["[S1]", "[S2]", "[S3]"],
+              "answer": "Yes, total assets of $359,241,000,000 [S1] equal total liabilities of "
+                        "$285,508,000,000 [S2] plus total shareholders' equity of $73,733,000,000 [S3] "
+                        "(285,508 + 73,733 = 359,241)."}))
+    a = gen.answer("Does the balance sheet balance?")
+    assert _no_number_warning(a) and a.confidence.band == "high"
+
+
+def test_differences_of_passage_numbers_are_allowed(world):
+    p = passages("a1", 0.9, 0.9)
+    # "grade=0.9" is what the fake grader reads, so the passage stays relevant.
+    p[0].chunk.text = "Wearables, Home and Accessories net sales were $35,686 in 2025 and $37,005 in 2024. grade=0.9"
+    world([p], groq=FakeGroq(answer={
+        "answerable": True, "citations": ["[1]"],
+        "answer": "Net sales fell from $37,005 in 2024 to $35,686 in 2025, a decrease of $1,319 [1]."}))
+    a = gen.answer("Why did Wearables net sales decrease?")
+    assert _no_number_warning(a)
+
+
+def test_a_wrong_number_is_still_caught(world):
+    world([passages("a1", 0.1)], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.9}, answer={
+              "answerable": True, "citations": ["[S1]"], "answer": "Net income was $11.2 billion [S1]."}))
+    a = gen.answer("net income FY2025?")
+    assert not _no_number_warning(a) and a.confidence.band == "low"
