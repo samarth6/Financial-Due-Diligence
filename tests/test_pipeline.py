@@ -360,3 +360,56 @@ def test_a_wrong_number_is_still_caught(world):
               "answerable": True, "citations": ["[S1]"], "answer": "Net income was $11.2 billion [S1]."}))
     a = gen.answer("net income FY2025?")
     assert not _no_number_warning(a) and a.confidence.band == "low"
+
+
+# --- confidence of answers resting on database figures ----------------------------
+
+W = get_config().confidence.weights
+
+
+def test_a_single_well_graded_figure_keeps_its_score(world):
+    world([passages("a1", 0.1)], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.9}, answer={
+              "answerable": True, "citations": ["[S1]"], "answer": "Net income was $112,010,000,000 [S1]."}))
+    a = gen.answer("net income FY2025?")
+    assert a.confidence.score == 0.9 and a.confidence.band == "high"
+
+
+def test_a_borderline_figure_drops_to_medium(world):
+    # The uncited 0.6 passage only gets Layer 4 past "2 relevant items".
+    world([passages("a1", 0.6)], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.55}, answer={
+              "answerable": True, "citations": ["[S1]"], "answer": "Net income was $112,010,000,000 [S1]."}))
+    a = gen.answer("net income FY2025?")
+    assert a.confidence.score == pytest.approx(0.9 * 0.55 / CFG.strong_chunk_threshold, abs=0.001)
+    assert a.confidence.band == "medium"
+    assert any("graded 0.55" in n for n in a.confidence.notes)
+
+
+def test_a_passage_that_restates_the_figure_does_not_lower_it(world):
+    """The income statement table writes net income as "112,010" (millions):
+    the same number, so citing it alongside [S1] changes nothing."""
+    p = passages("a1", 0.9)
+    p[0].chunk.text = "CONSOLIDATED STATEMENTS OF OPERATIONS (in millions) Net income 112,010 93,736 grade=0.9"
+    world([p], facts=[fact("Net income", 112_010e6)],
+          groq=FakeGroq(fact_grades={"Net income": 0.9}, answer={
+              "answerable": True, "citations": ["[S1]", "[1]"],
+              "answer": "Net income was $112,010,000,000 [S1][1]."}))
+    a = gen.answer("net income FY2025?")
+    assert a.confidence.score == 0.9 and a.confidence.band == "high"
+    assert not any("blended" in n for n in a.confidence.notes)
+
+
+def test_a_passage_that_adds_a_reason_is_blended_in(world):
+    """The passage below was found by one search only and has no reranker
+    score, so its search confidence is just the first-try part of the formula."""
+    p = passages("a1", 0.9)
+    p[0].chunk.text = "Services net sales grew due to higher advertising and cloud services. grade=0.9"
+    world([p], facts=[fact("Services", 109_158e6)],
+          groq=FakeGroq(fact_grades={"Services": 0.9}, answer={
+              "answerable": True, "citations": ["[S1]", "[1]"],
+              "answer": "Services net sales were $109,158,000,000 [S1], driven by advertising and cloud [1]."}))
+    a = gen.answer("Why did Services grow?")
+    assert a.confidence.score == pytest.approx((0.9 + W.loop_cleanliness * 1.0) / 2, abs=0.001)
+    assert a.confidence.band != "high"
+    assert any("1 cited passage(s) carry part of the answer" in n for n in a.confidence.notes)

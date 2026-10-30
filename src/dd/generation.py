@@ -292,6 +292,34 @@ def _loop_cleanliness(outcome: RetrievalOutcome, cfg: Config) -> float:
     return 1.0 - (len(outcome.attempts) - 1) / (max_attempts - 1)
 
 
+def _search_signals(chunks: list[GradedChunk]) -> tuple[float, float]:
+    """(share found by both searches, strongest reranker score) for these passages."""
+    # Signal 1: share of the passages that BOTH dense and keyword search found.
+    hybrid = sum(1 for g in chunks if g.retrieved.found_by_both) / len(chunks) if chunks else 0.0
+    # Signal 2: strongest cross-encoder score among them. Measured on the eval
+    # set: answerable questions topped out at 0.41-0.999, unanswerable ones at
+    # 0.0005-0.022, so the raw 0-1 score is used as-is, no rescaling.
+    rerank = max((g.retrieved.rerank_score or 0.0 for g in chunks), default=0.0)
+    return hybrid, rerank
+
+
+def _repeats_a_figure(g: GradedChunk, facts: list[dict]) -> bool:
+    """Does this passage state one of the cited figures - the same number,
+    or the same number in millions or billions as 10-K tables write it
+    ("112,010" for $112,010,000,000)? Then it backs that figure up instead
+    of adding anything of its own.
+    """
+    targets = [abs(f["value"]) / scale for f in facts if f["value"] for scale in (1, 1e6, 1e9)]
+    for d in re.findall(r"\d[\d,]*(?:\.\d+)?", g.retrieved.chunk.text):
+        d = d.rstrip(",.")
+        n = float(d.replace(",", ""))
+        # Half a unit of the last digit written, as in _numbers().
+        tol = 0.5 * 10 ** -(len(d.split(".")[1]) if "." in d else 0)
+        if any(abs(n - t) <= tol for t in targets):
+            return True
+    return False
+
+
 def _band(score: float, cfg: Config) -> str:
     b = cfg.confidence.bands
     if score >= b.high:
@@ -316,17 +344,7 @@ def _confidence(
     cited_chunks = [e for e in cited if not isinstance(e, dict)]
     cited_facts = [e for e in cited if isinstance(e, dict)]
 
-    # Signal 1: share of cited chunks that BOTH dense and keyword search found.
-    hybrid = (
-        sum(1 for g in cited_chunks if g.retrieved.found_by_both) / len(cited_chunks)
-        if cited_chunks else 0.0
-    )
-    # Signal 2: strongest cross-encoder score among cited chunks. Measured on
-    # the eval set: answerable questions topped out at 0.41-0.999, unanswerable
-    # ones at 0.0005-0.022, so the raw 0-1 score is used as-is, no rescaling.
-    rerank = max(
-        (g.retrieved.rerank_score or 0.0 for g in cited_chunks), default=0.0
-    )
+    hybrid, rerank = _search_signals(cited_chunks)
     # Signal 3: did Layer 4 get there on the first try?
     loop = _loop_cleanliness(outcome, cfg)
 
@@ -344,6 +362,28 @@ def _confidence(
             "answer rests on exact values from the financial statements"
             + (" (matched by fuzzy wording - check the label)" if fuzzy else "")
         )
+        # The figure is exact, but is it the one the question asked for? Layer
+        # 4's grade says; below the "strong" line the score drops with it, so
+        # a figure graded 0.5 lands in MEDIUM.
+        strong = cfg.self_healing.strong_chunk_threshold
+        weakest = min(f.get("_relevance", 1.0) for f in cited_facts)
+        if weakest < strong:
+            score *= weakest / strong
+            notes.append(f"weakest cited figure was graded {weakest:.2f}")
+        # A cited passage that only restates a figure adds nothing to doubt.
+        # One that adds something else (a reason, a comparison) carries part
+        # of the answer, so its search confidence counts for its share.
+        own = [g for g in cited_chunks if not _repeats_a_figure(g, cited_facts)]
+        if own:
+            own_hybrid, own_rerank = _search_signals(own)
+            passage_score = (
+                w.hybrid_agreement * own_hybrid + w.rerank_strength * own_rerank + w.loop_cleanliness * loop
+            )
+            score = (score * len(cited_facts) + passage_score * len(own)) / (len(cited_facts) + len(own))
+            notes.append(
+                f"{len(own)} cited passage(s) carry part of the answer; "
+                f"their search confidence ({passage_score:.2f}) is blended in"
+            )
         # Was every requested line item x year found? A flagged fact (year
         # not in the data, ambiguous label) means part of the question wasn't.
         missing = [f for f in outcome.structured_facts if "value" not in f]
