@@ -1,0 +1,16 @@
+.venv/
+.git/
+.env
+__pycache__/
+*.pyc
+node_modules/
+web/node_modules/
+data/*
+!data/raw
+eval/results*.jsonl
+eval/review*.md
+fixes-round2.patch
+check_*.py
+measure_rerank.py
+debug_answer.py
+web/dist/
