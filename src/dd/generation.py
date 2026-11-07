@@ -31,7 +31,7 @@ from .models import (
     GradedChunk,
     RetrievalOutcome,
 )
-from .self_healing import ProgressFn, emit, get_groq_client, self_heal
+from .self_healing import ProgressFn, emit, get_groq_client, search_parts, self_heal
 from .structured import SEGMENT_LABELS, describe_fact, segments_mentioned
 
 # --- Step 1: lay out the evidence with markers -----------------------------
@@ -276,14 +276,24 @@ def _allowed_values(cited: list[GradedChunk | dict]) -> tuple[list[float], list[
     for g in cited:
         if isinstance(g, dict):
             continue
-        for m in re.finditer(r"(\d[\d,]*(?:\.\d+)?)(\s*(?:million|billion))?", g.retrieved.chunk.text, re.IGNORECASE):
-            digits = m.group(1).rstrip(",.")
-            numbers.append(float(digits.replace(",", "")))
-            if "." in digits and not m.group(2):
-                cents.append(numbers[-1])
+        for line in g.retrieved.chunk.text.split("\n"):
+            row = []
+            for m in re.finditer(r"(\d[\d,]*(?:\.\d+)?)(\s*(?:million|billion))?", line, re.IGNORECASE):
+                digits = m.group(1).rstrip(",.")
+                row.append(float(digits.replace(",", "")))
+                if "." in digits and not m.group(2):
+                    cents.append(row[-1])
+            numbers += row
+            # % change between two numbers in the same row: "diluted EPS rose
+            # 22.7%" is $6.08 to $7.46 on one line of the EPS table. Only within
+            # a row - across a whole passage, almost any percentage would match.
+            for a, b in itertools.permutations(row, 2):
+                if a:
+                    cells.append(abs(b - a) / abs(a) * 100)
     for v in _with_pairs(numbers):
         cells.append(v)
-        dollars += [v * 1e6, v * 1e9]
+        # Share counts are tabled "in thousands", amounts "in millions".
+        dollars += [v * 1e3, v * 1e6, v * 1e9]
     dollars += _with_pairs(cents)
     return dollars, cells
 
@@ -506,7 +516,7 @@ def generate_answer(
 
     # Refusal 2: the evidence is on-topic but doesn't answer what was asked.
     if not result["answerable"]:
-        return Answer(query=query, answered=False, text=result["answer"], outcome=outcome)
+        return Answer(query=query, answered=False, text=result["answer"], outcome=outcome, refused_by_model=True)
 
     # Check markers from both places: inline in the text, and the required
     # "citations" list. Wrap bare "S1" as "[S1]" in case the model drops the
@@ -570,5 +580,22 @@ def answer(query: str, cfg: Config | None = None, on_progress: ProgressFn | None
         result = _model_failed(query, exc)
     else:
         result = generate_answer(outcome, conf, on_progress)
+        # No answer from the question's own words - whether Layer 4 refused the
+        # evidence or the answer model found it doesn't answer the question:
+        # one more search, with the question split into parts. Both happen to
+        # eval Q20 on different runs, depending on how the grader scores the
+        # net income lines. A failed model call has nothing to gain from it.
+        if result.refused_by_model or not outcome.succeeded:
+            try:
+                retried = search_parts(outcome, conf, on_progress)
+            except Exception:  # noqa: BLE001 - the extra search is an extra try; keep the refusal
+                retried = None
+            if retried is not None and retried.succeeded:
+                result = generate_answer(retried, conf, on_progress)
+                if result.confidence is not None:
+                    result.confidence.notes.append(
+                        "found on a second search: the first evidence didn't answer the question, so it was "
+                        f"split into parts ({retried.final_query})"
+                    )
     result.elapsed_s = round(time.perf_counter() - start, 2)
     return result

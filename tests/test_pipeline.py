@@ -57,10 +57,13 @@ class FakeGroq:
     schema). `fail` makes the named call raise, like a rate limit."""
 
     def __init__(self, fact_grades: dict[str, float] | None = None,
-                 answer: dict | None = None, fail: str | None = None,
-                 unreadable_grades: bool = False, shuffle_grades: bool = False) -> None:
+                 answer: dict | list[dict] | None = None, fail: str | None = None,
+                 unreadable_grades: bool = False, shuffle_grades: bool = False,
+                 parts: list[str] | None = None) -> None:
         self.fact_grades = fact_grades or {}
+        # A list is replied in turn, one per answer call.
         self.answer = answer or {"answerable": True, "answer": "Tariffs could hurt margins [1].", "citations": ["[1]"]}
+        self.parts = parts or []  # what splitting the question returns
         self.fail = fail
         self.unreadable_grades = unreadable_grades
         self.shuffle_grades = shuffle_grades  # list grades in reverse order, as a real model sometimes does
@@ -81,7 +84,9 @@ class FakeGroq:
                 grades.reverse()
             content = "not json at all" if self.unreadable_grades else json.dumps({"grades": grades})
         elif kind == "grounded_answer":
-            content = json.dumps(self.answer)
+            content = json.dumps(self.answer.pop(0) if isinstance(self.answer, list) else self.answer)
+        elif kind == "question_parts":
+            content = json.dumps({"parts": self.parts})
         else:
             self.rewrites += 1
             content = f"reworded question {self.rewrites}"
@@ -388,6 +393,43 @@ def test_a_dollar_amount_that_lost_its_millions_is_caught(world, answer):
     assert not _no_number_warning(a) and a.confidence.band == "low"
 
 
+# Note 3 as the index holds it: one table row per line. The fake grader reads
+# "grade=" from an item's first line only.
+EPS_TABLE = "\n".join([
+    "Note 3 - Earnings Per Share grade=0.9",
+    "(net income in millions and shares in thousands):",
+    "2025 | 2024 | 2023",
+    "Net income | $112,010 | $93,736 | $96,995",
+    "Weighted-average diluted shares | 15,004,697 | 15,408,095 | 15,812,547",
+    "Diluted earnings per share | $7.46 | $6.08 | $6.13",
+])
+
+
+def _answer_from_eps_table(world, answer: str):
+    p = passages("a1", 0.9, 0.9)
+    p[0].chunk.text = EPS_TABLE
+    world([p], groq=FakeGroq(answer={"answerable": True, "citations": ["[1]"], "answer": answer}))
+    return gen.answer("Why did diluted EPS grow faster than net income?")
+
+
+def test_share_counts_in_thousands_and_changes_within_a_row_are_allowed(world):
+    """Eval Q18's real answer was right but marked LOW: the table states
+    shares "in thousands", and the percentages are changes along its rows."""
+    a = _answer_from_eps_table(world, (
+        "Net income increased 19.5% from $93,736 million to $112,010 million [1]. Diluted shares declined "
+        "from 15,408,095 thousand to 15,004,697 thousand, a drop of about 2.6% [1]. Diluted EPS rose 22.7% "
+        "from $6.08 per share to $7.46 per share [1]."))
+    assert _no_number_warning(a)
+
+
+@pytest.mark.parametrize("answer", [
+    "Net income increased 25.0% [1].",                     # matches no change in any row
+    "Diluted EPS rose from $6.08 to $8.12 per share [1].",  # not in the table
+])
+def test_a_percentage_or_figure_not_in_the_table_is_still_caught(world, answer):
+    assert not _no_number_warning(_answer_from_eps_table(world, answer))
+
+
 def test_a_database_figure_without_its_millions_is_caught(world):
     world([passages("a1", 0.1)], facts=[fact("Net income", 112_010e6)],
           groq=FakeGroq(fact_grades={"Net income": 0.9}, answer={
@@ -593,3 +635,77 @@ def test_a_passage_that_adds_a_reason_is_blended_in(world):
     assert a.confidence.score == pytest.approx((0.9 + W.loop_cleanliness * 1.0) / 2, abs=0.001)
     assert a.confidence.band != "high"
     assert any("1 cited passage(s) carry part of the answer" in n for n in a.confidence.notes)
+
+
+# --- a second search when the answer step finds nothing answers it ---------------
+# Eval Q20: "what caused the FY2024 net income dip?" finds the net income lines;
+# the answer step rightly refuses; the cause (a tax charge) sits where the
+# question's words never reach - but a search for one of its parts does.
+
+REFUSAL = {"answerable": False, "answer": "Nothing here explains the dip.", "citations": []}
+TAX_ANSWER = {"answerable": True, "answer": "A one-time tax charge lowered FY2024 net income [3].",
+              "citations": ["[3]"]}
+PARTS = ["Provision for income taxes in FY2024", "One-time charges in FY2024"]
+
+
+def test_a_refused_answer_gets_one_more_search_with_the_question_split(world):
+    found, cause = passages("a1", 0.9, 0.6), passages("tax", 0.9)
+    groq = FakeGroq(answer=[REFUSAL, TAX_ANSWER], parts=PARTS)
+    world([found, cause, cause], groq=groq)  # the question's search, then one per part
+    events = []
+    a = gen.answer("What caused the FY2024 dip?", on_progress=lambda s, d: events.append((s, d)))
+
+    assert a.answered and [c.chunk_id for c in a.citations] == ["tax-0"]
+    assert "split" in stages(events)
+    assert a.outcome.attempts[-1].strategy == "decompose"
+    assert any("second search" in n for n in a.confidence.notes)
+    # Graded against the question as asked, with its parts alongside: without
+    # them a real grader scored the tax table 0.0, "no cause of dip".
+    second_grading = groq.prompts["chunk_grades"][-1]
+    assert "What caused the FY2024 dip?" in second_grading
+    assert all(f"- {p}" in second_grading for p in PARTS)
+    assert "- " + PARTS[0] not in groq.prompts["chunk_grades"][0], "the first grading has no parts"
+
+
+def test_a_question_that_cannot_be_split_keeps_its_refusal(world):
+    groq = FakeGroq(answer=[REFUSAL, TAX_ANSWER], parts=[])
+    world([passages("a1", 0.9, 0.6)], groq=groq)
+    a = gen.answer("What caused the FY2024 dip?")
+    assert not a.answered and a.text == REFUSAL["answer"]
+    assert len(groq.prompts["grounded_answer"]) == 1
+
+
+def test_the_second_search_happens_once(world):
+    groq = FakeGroq(answer=[REFUSAL, REFUSAL, TAX_ANSWER], parts=PARTS)
+    world([passages("a1", 0.9, 0.6), passages("tax", 0.9)], groq=groq)
+    a = gen.answer("What caused the FY2024 dip?")
+    assert not a.answered
+    assert len(groq.prompts["question_parts"]) == 1 and len(groq.prompts["grounded_answer"]) == 2
+
+
+def test_a_question_layer_4_refuses_also_gets_the_second_search(world):
+    """The same question was refused by Layer 4 on one real run and by the
+    answer step on another, depending on how the net income lines graded."""
+    # Nothing from the first search passed, so the part's passages are [1] and [2].
+    groq = FakeGroq(answer={**TAX_ANSWER, "answer": "A one-time tax charge [1].", "citations": ["[1]"]},
+                    parts=PARTS)
+    weak, cause = passages("a1", 0.05), passages("tax", 0.9, 0.9)
+    world([weak, cause, cause], groq=groq)
+    a = gen.answer("What caused the FY2024 dip?")
+    assert len(groq.prompts["question_parts"]) == 1
+    assert a.answered and a.outcome.attempts[-1].strategy == "decompose"
+
+
+def test_a_question_answered_the_first_time_gets_no_second_search(world):
+    groq = FakeGroq(parts=PARTS)
+    world([passages("a1", 0.9, 0.6)], groq=groq)
+    assert gen.answer("question?").answered
+    assert "question_parts" not in groq.prompts
+
+
+def test_a_second_search_that_finds_nothing_keeps_the_refusal(world):
+    groq = FakeGroq(answer=TAX_ANSWER, parts=PARTS)
+    world([passages("a1", 0.05), passages("x", 0.05)], groq=groq)
+    a = gen.answer("What is Apple's projected revenue for FY2027?")
+    assert not a.answered and "question_parts" in groq.prompts
+    assert "grounded_answer" not in groq.prompts, "nothing passed, so no answer was written"

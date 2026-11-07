@@ -25,6 +25,8 @@ export function stepLabel({ stage, details }) {
       return `Weak results - rewording the question (attempt ${d.attempt}): "${d.query}"`;
     case "stagnated":
       return `Rewording found the same passages again (attempt ${d.attempt}) - stopping`;
+    case "split":
+      return `The evidence didn't answer it - searching again in ${d.parts?.length} parts: ${(d.parts || []).map((p) => `"${p}"`).join(", ")}`;
     case "give_up":
       return `Nothing scored above ${d.below} (best ${d.best}) - the filing likely doesn't cover this; stopping early`;
     case "write":

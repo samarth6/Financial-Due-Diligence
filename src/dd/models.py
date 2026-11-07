@@ -143,3 +143,6 @@ class Answer(BaseModel):
     confidence: ConfidenceBreakdown | None = None
     outcome: RetrievalOutcome | None = None
     elapsed_s: float = 0.0
+    # Layer 4 passed the evidence, but the answer model read it and said it
+    # doesn't answer the question - the one refusal a second search can fix.
+    refused_by_model: bool = False

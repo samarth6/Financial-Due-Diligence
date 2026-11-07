@@ -19,7 +19,7 @@ from groq import Groq
 from .config import Config, get_config, get_secrets
 from .models import AttemptRecord, Chunk, GradedChunk, RetrievalOutcome, RetrievedChunk
 from .retrieval import hybrid_retrieve
-from .structured import describe_fact, get_structured_facts
+from .structured import MAX_FACTS, describe_fact, get_structured_facts
 
 _CLIENT: Groq | None = None
 
@@ -67,7 +67,7 @@ filing actually answers a question - not whether it's topically related, \
 but whether it contains the specific information asked for.
 
 Question: {question}
-
+{parts}
 Evidence:
 {passages}
 
@@ -128,8 +128,24 @@ def _marker(item: object) -> str:
     return m.group(1) if m else ""
 
 
+# Shown to the grader on the second search (search_parts), whose evidence came
+# from the question's parts. Without it, a passage holding one part - the tax
+# reconciliation showing a $10,246 million State Aid charge in FY2024 - was
+# graded 0.0 against "what caused the FY2024 net income dip?" as "tax
+# reconciliation; no cause of dip", and the question was still refused.
+_PARTS_NOTE = """
+To find the evidence, the question was split into these parts, each searched \
+on its own:
+{parts}
+An item that answers one of these parts is evidence for the question, even \
+though it does not state the whole answer: score it as if that part were the \
+question.
+"""
+
+
 def grade_chunks(
-    query: str, chunks: list[RetrievedChunk], cfg: Config, facts: list[dict] | None = None
+    query: str, chunks: list[RetrievedChunk], cfg: Config, facts: list[dict] | None = None,
+    parts: list[str] | None = None,
 ) -> tuple[list[GradedChunk], list[float]]:
     """Grade every chunk - and any database facts - in ONE call.
 
@@ -154,6 +170,7 @@ def grade_chunks(
     sh = cfg.self_healing
     prompt = _GRADE_PROMPT.format(
         question=query, passages="\n\n".join(items), n=n,
+        parts=_PARTS_NOTE.format(parts="\n".join(f"- {p}" for p in parts)) if parts else "",
         strong=f"{sh.strong_chunk_threshold:g}",
         relevant=f"{sh.relevance_threshold:g}",
         weak=f"{sh.give_up_below:g}",
@@ -424,5 +441,130 @@ def self_heal(
         chunks=best_chunks,
         attempts=attempts,
         structured_facts=relevant_facts + flagged_facts,
+        relevance_threshold=sh.relevance_threshold,
+    )
+
+
+# --- Step 4: one more search when the answer step finds nothing answers it --
+
+# A question asking WHY a figure changed matches the figure, not its cause:
+# "what caused the FY2024 net income dip?" finds the net income lines, and the
+# answer step rightly says nothing there explains the dip. The cause (a tax
+# charge) sits in a table the question's words never reach. Splitting the
+# question into what the figure is calculated from - one search per part -
+# does reach it. Tested on the real model before this was written: the
+# split reached the tax reconciliation in 2 of 2 runs; rewording the
+# question as one query reached it in 0 of 2.
+_SPLIT_PROMPT = """A question about a company's 10-K filing was searched \
+as written, and the evidence found did not answer it. It may need several \
+separate facts that no single search reaches.
+
+Question: {question}
+
+List the separate facts needed to answer it, as at most {max_parts} short \
+search queries: one per figure or topic, naming the line item as a 10-K \
+states it and the fiscal years that matter.
+
+When the question asks WHY a figure changed, the parts must cover what that \
+figure is calculated from, so the cause can be found: a per-share figure \
+comes from earnings and the share count; net income from operating income, \
+other income and the provision for income taxes; a margin from sales and \
+costs. Add a part for one-time items or charges in the year that changed, \
+naming the kinds of item (for example an impairment, a legal settlement, a \
+restructuring or a tax charge).
+
+Ask only for what the question needs, and only for line items a 10-K \
+actually reports - never invent one. Never swap in a different measure: if \
+the question asks for units sold, a part asks for units sold, not revenue.
+
+If the question needs only one fact, return an empty list."""
+
+_SPLIT_SCHEMA = {
+    "type": "object",
+    "properties": {"parts": {"type": "array", "items": {"type": "string"}}},
+    "required": ["parts"],
+    "additionalProperties": False,
+}
+
+MAX_PARTS = 4
+# Best few passages per part: 4 parts x 3 bounds the one grading call.
+PASSAGES_PER_PART = 3
+
+
+def split_question(query: str, cfg: Config) -> list[str]:
+    """The question's separate facts as short search queries; [] when it is
+    one fact. The extra call is an extra try, so a failed one returns []
+    and leaves the answer as it was."""
+    try:
+        resp = get_groq_client(cfg).chat.completions.create(
+            model=cfg.generation.utility_model,
+            messages=[{"role": "user", "content": _SPLIT_PROMPT.format(question=query, max_parts=MAX_PARTS)}],
+            max_tokens=cfg.generation.utility_max_tokens,
+            temperature=0.0,
+            reasoning_effort=cfg.generation.utility_effort,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "question_parts", "schema": _SPLIT_SCHEMA, "strict": True},
+            },
+        )
+        parts = json.loads(resp.choices[0].message.content or "")["parts"]
+    except Exception:  # noqa: BLE001
+        return []
+    clean = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
+    return list(dict.fromkeys(clean))[:MAX_PARTS]
+
+
+def search_parts(
+    outcome: RetrievalOutcome, cfg: Config | None = None, on_progress: ProgressFn | None = None
+) -> RetrievalOutcome | None:
+    """The question's own search found no answer - Layer 4 refused the
+    evidence, or Layer 5 found it doesn't answer the question: split the
+    question, search each part, and grade what's found together with what was
+    already relevant - against the question as asked, with the parts shown.
+    None if the question can't be split; called at most once per question.
+    """
+    conf = cfg or get_config()
+    sh = conf.self_healing
+    query = outcome.original_query
+    parts = split_question(query, conf)
+    if not parts:
+        return None
+    attempt_num = len(outcome.attempts) + 1
+    emit(on_progress, "split", attempt=attempt_num, parts=parts)
+
+    passages = {g.retrieved.chunk.chunk_id: g.retrieved for g in outcome.relevant_chunks}
+    figures = {(f["table"], f["label"], f["year"]): {k: v for k, v in f.items() if k != "_relevance"}
+               for f in outcome.structured_facts if "value" in f}
+    for part in parts:
+        for rc in hybrid_retrieve(part, conf)[:PASSAGES_PER_PART]:
+            passages.setdefault(rc.chunk.chunk_id, rc)
+        for f in get_structured_facts(part, conf):
+            if "value" in f:
+                figures.setdefault((f["table"], f["label"], f["year"]), f)
+    retrieved, facts = list(passages.values()), list(figures.values())[:MAX_FACTS]
+
+    emit(on_progress, "grade", attempt=attempt_num, passages=len(retrieved), facts=len(facts))
+    graded, fact_scores = grade_chunks(query, retrieved, conf, facts, parts)
+    relevant_facts = [{**f, "_relevance": s} for f, s in zip(facts, fact_scores) if s >= sh.relevance_threshold]
+    n_relevant = sum(1 for g in graded if g.relevance >= sh.relevance_threshold)
+    emit(on_progress, "graded", attempt=attempt_num, relevant=n_relevant, total=len(graded),
+         facts_relevant=len(relevant_facts), facts_total=len(facts))
+    scores = [g.relevance for g in graded] + [f["_relevance"] for f in relevant_facts]
+    succeeded = (n_relevant + len(relevant_facts) >= sh.min_relevant_chunks
+                 or any(s >= sh.strong_chunk_threshold for s in scores))
+    record = AttemptRecord(
+        attempt=attempt_num, query="; ".join(parts), strategy="decompose",
+        n_retrieved=len(retrieved), n_relevant=n_relevant,
+        mean_relevance=sum(g.relevance for g in graded) / len(graded) if graded else 0.0,
+        chunk_ids=sorted(passages), note=f"split into {len(parts)} parts after the first search found no answer",
+    )
+    return RetrievalOutcome(
+        original_query=query,
+        final_query="; ".join(parts),
+        succeeded=succeeded,
+        abstain_reason="" if succeeded else f"searching the question's {len(parts)} parts found too little",
+        chunks=graded,
+        attempts=outcome.attempts + [record],
+        structured_facts=relevant_facts + [f for f in outcome.structured_facts if "value" not in f],
         relevance_threshold=sh.relevance_threshold,
     )
